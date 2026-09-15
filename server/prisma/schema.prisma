@@ -1,0 +1,154 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+  moduleFormat = "esm"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// Technical migration baseline.
+model ServiceMetadata {
+  key   String @id @db.VarChar(64)
+  value String @db.VarChar(255)
+
+  @@map("service_metadata")
+}
+
+model Pair {
+  id               String    @id @default(uuid()) @db.Uuid
+  singleton        Int       @unique @default(1)
+  setupCompletedAt DateTime? @db.Timestamptz(3)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
+  users            User[]
+  pairingCodes     PairingCode[]
+
+  @@map("pairs")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  pairId       String   @db.Uuid
+  memberSlot   Int
+  displayName  String   @db.VarChar(80)
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  pair         Pair     @relation(fields: [pairId], references: [id], onDelete: Restrict)
+  devices      Device[]
+  pairingCodes PairingCode[]
+  albums       Album[]
+  assets       Asset[]
+
+  @@unique([pairId, memberSlot])
+  @@map("users")
+}
+
+model Device {
+  id            String    @id @default(uuid()) @db.Uuid
+  userId        String    @db.Uuid
+  name          String    @db.VarChar(80)
+  tokenHash     String?   @unique @db.Char(64)
+  createdAt     DateTime  @default(now()) @db.Timestamptz(3)
+  revokedAt     DateTime? @db.Timestamptz(3)
+  user          User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  pairingCodes  PairingCode[]
+  sourceAlbums  Album[]
+
+  @@unique([id, userId])
+  @@index([userId])
+  @@map("devices")
+}
+
+model PairingCode {
+  id                String    @id @default(uuid()) @db.Uuid
+  pairId            String    @db.Uuid
+  createdByDeviceId String    @db.Uuid
+  targetUserId      String?   @db.Uuid
+  purpose           String    @db.VarChar(16)
+  codeHash          String    @unique @db.Char(64)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  expiresAt         DateTime  @db.Timestamptz(3)
+  consumedAt        DateTime? @db.Timestamptz(3)
+  revokedAt         DateTime? @db.Timestamptz(3)
+  pair              Pair      @relation(fields: [pairId], references: [id], onDelete: Restrict)
+  createdByDevice   Device    @relation(fields: [createdByDeviceId], references: [id], onDelete: Restrict)
+  targetUser        User?     @relation(fields: [targetUserId], references: [id], onDelete: Restrict)
+
+  @@index([createdByDeviceId])
+  @@index([expiresAt])
+  @@map("pairing_codes")
+}
+
+model Album {
+  id             String   @id @default(uuid()) @db.Uuid
+  ownerId        String   @db.Uuid
+  sourceDeviceId String   @db.Uuid
+  clientAlbumId  String   @db.VarChar(255)
+  title          String   @db.VarChar(200)
+  sharedAt       DateTime? @db.Timestamptz(3)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+  owner          User     @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  sourceDevice   Device   @relation(fields: [sourceDeviceId, ownerId], references: [id, userId], onDelete: Restrict)
+  assets         Asset[]
+
+  @@unique([sourceDeviceId, clientAlbumId])
+  @@unique([id, ownerId])
+  @@index([ownerId])
+  @@map("albums")
+}
+
+model Asset {
+  id               String    @id @default(uuid()) @db.Uuid
+  ownerId          String    @db.Uuid
+  albumId          String    @db.Uuid
+  originalFileName String    @db.VarChar(255)
+  mimeType         String    @db.VarChar(127)
+  capturedAt       DateTime? @db.Timestamptz(3)
+  fileSize         BigInt
+  width            Int
+  height           Int
+  durationMillis   BigInt?
+  sourceDeviceId   String?   @db.Uuid
+  clientAssetId    String?   @db.VarChar(255)
+  expectedSha256   String?   @db.Char(64)
+  sha256           String?   @db.Char(64)
+  storagePath      String    @unique @db.VarChar(512)
+  status           String    @default("pending") @db.VarChar(16)
+  createdAt        DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime  @updatedAt @db.Timestamptz(3)
+  owner            User      @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  album            Album     @relation(fields: [albumId, ownerId], references: [id, ownerId], onDelete: Restrict)
+  derivatives      AssetDerivative[]
+
+  @@unique([sourceDeviceId, clientAssetId])
+  @@unique([albumId, expectedSha256])
+  @@index([ownerId])
+  @@index([albumId, createdAt])
+  @@map("assets")
+}
+
+
+model AssetDerivative {
+  id             String   @id @default(uuid()) @db.Uuid
+  assetId        String   @db.Uuid
+  kind           String   @db.VarChar(16)
+  status         String   @default("pending") @db.VarChar(16)
+  mimeType       String?  @db.VarChar(127)
+  storagePath    String?  @unique @db.VarChar(512)
+  fileSize       BigInt?
+  width          Int?
+  height         Int?
+  durationMillis BigInt?
+  sha256         String?  @db.Char(64)
+  attempts       Int      @default(0)
+  lastError      String?  @db.VarChar(500)
+  nextAttemptAt  DateTime @default(now()) @db.Timestamptz(3)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+  asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+
+  @@unique([assetId, kind])
+  @@index([status, nextAttemptAt])
+  @@map("asset_derivatives")
+}

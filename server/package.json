@@ -3,12 +3,43 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": "24.x" },
+  "engines": {
+    "node": "24.x"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "prisma:generate": "prisma generate",
+    "migrate:deploy": "prisma migrate deploy",
+    "migrate:status": "prisma migrate status",
+    "migrate:dev": "prisma migrate dev",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 test/integration/*.test.mjs",
+    "setup:token": "node dist/auth/setup-token.js"
   },
-  "dependencies": { "fastify": "^5.0.0" },
-  "devDependencies": { "@types/node": "^24.0.0", "typescript": "~5.9.3" }
+  "dependencies": {
+    "fastify": "^5.0.0",
+    "@prisma/client": "7.10.0",
+    "@prisma/adapter-pg": "7.10.0",
+    "pg": "^8.16.3",
+    "pino": "^10.0.0",
+    "zod": "^4.0.0",
+    "@fastify/rate-limit": "11.2.0",
+    "sharp": "0.35.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "~5.9.3",
+    "prisma": "7.10.0",
+    "@types/pg": "^8.15.0"
+  },
+  "overrides": {
+    "@prisma/config": {
+      "deepmerge-ts": "8.0.2"
+    },
+    "prisma": {
+      "mysql2": "3.24.4"
+    }
+  }
 }

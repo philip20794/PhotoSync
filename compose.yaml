@@ -1,3 +1,23 @@
+name: photosync-dev
+
+x-backend-environment: &backend-environment
+  NODE_ENV: development
+  HOST: 0.0.0.0
+  PORT: "3000"
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_TIMEOUT_MS: ${DATABASE_TIMEOUT_MS:-2000}
+  SETUP_TOKEN_HASH: ${SETUP_TOKEN_HASH:-}
+  PAIRING_CODE_TTL_SECONDS: ${PAIRING_CODE_TTL_SECONDS:-600}
+  AUTH_RATE_LIMIT_MAX: ${AUTH_RATE_LIMIT_MAX:-10}
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-1073741824}
+  DERIVATIVE_WORKER_ENABLED: ${DERIVATIVE_WORKER_ENABLED:-true}
+  DERIVATIVE_POLL_INTERVAL_MS: ${DERIVATIVE_POLL_INTERVAL_MS:-1000}
+  DERIVATIVE_MAX_ATTEMPTS: ${DERIVATIVE_MAX_ATTEMPTS:-5}
+  DERIVATIVE_TOOL_TIMEOUT_MS: ${DERIVATIVE_TOOL_TIMEOUT_MS:-600000}
+  DATABASE_URL: postgresql://${POSTGRES_USER:-photosync}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD setzen}@db:5432/${POSTGRES_DB:-photosync}
+  MEDIA_DEV_ROOT: /media/development
+  MEDIA_PROD_ROOT: /media/production
+
 services:
   db:
     image: postgres:17-bookworm
@@ -9,27 +29,80 @@ services:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      interval: 3s
+      timeout: 3s
+      retries: 20
     restart: unless-stopped
+
+  migrate:
+    build:
+      context: ./server
+      target: migration
+    environment: *backend-environment
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
   server:
-    build: ./server
-    environment:
-      PORT: "3000"
-      DATABASE_URL: postgresql://${POSTGRES_USER:-photosync}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD setzen}@db:5432/${POSTGRES_DB:-photosync}
-      MEDIA_ROOT: /media/photosync
+    build:
+      context: ./server
+      target: runtime
+    environment: *backend-environment
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:${SERVER_PORT:-3000}:3000"
     volumes:
       - type: bind
-        source: ${PHOTOSYNC_MEDIA_PATH:?PHOTOSYNC_MEDIA_PATH setzen}
-        target: /media/photosync
+        source: ${PHOTOSYNC_DEV_MEDIA_PATH:-./.local/media}
+        target: /media/development
         bind:
           create_host_path: false
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health', {signal: AbortSignal.timeout(4000)}).then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+    stop_grace_period: 15s
     restart: unless-stopped
+
+  test-db:
+    profiles: [test]
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_DB: photosync_test
+      POSTGRES_USER: photosync_test
+      POSTGRES_PASSWORD: local_test_only
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "photosync_test", "-d", "photosync_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  test:
+    profiles: [test]
+    build:
+      context: ./server
+      target: development
+    environment:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://photosync_test:local_test_only@test-db:5432/photosync_test
+      MEDIA_DEV_ROOT: /tmp/photosync-test-media
+      MEDIA_PROD_ROOT: /unused-production
+      PHOTOSYNC_INTEGRATION_TEST: "1"
+      LOG_LEVEL: silent
+      DERIVATIVE_WORKER_ENABLED: "false"
+    command: ["sh", "-c", "mkdir -p /tmp/photosync-test-media && npm run migrate:deploy && npm test && npm run test:integration"]
+    depends_on:
+      test-db:
+        condition: service_healthy
+
 volumes:
   postgres_data:

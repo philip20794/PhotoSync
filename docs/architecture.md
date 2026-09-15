@@ -1,6 +1,6 @@
 # Architektur
 
-Stand: 14.09.2026. Zielentwurf; nur der leere Server-Bootstrap und Docker-Konfiguration existieren bereits.
+Stand: 14.09.2026. Zielentwurf mit implementierter Backend-Basis: Environment-Validierung, Prisma-Migrationen, JSON-Logging, zentrale Fehlerbehandlung und Readiness unter `/health`. Gerätebasierte Authentifizierung, Zwei-Personen-Setup und Einmal-Pairing sind implementiert. Album- und Assetmetadaten sowie atomarer Original-Upload und -Download sind implementiert. Die Android-App besitzt eine paginierte MediaStore-Galerie und eine grundlegende persistente Original-Upload-Queue für freigegebene Alben; serverseitige Bild-/Videoderivate und Range-Streaming sind implementiert; Partnergalerie und Papierkorb folgen später.
 
 ## Umfang und Entscheidungen
 
@@ -13,10 +13,14 @@ Zwei Nutzer mit zunächst je einem Android-Gerät teilen ausgewählte vorhandene
 | DB-Zugriff | Prisma ORM | Typisierter Client und versionierte SQL-Migrationen; komplexe Sync-Sperren bei Bedarf über parametrisierte SQL-Abfragen in derselben Transaktion. |
 | Android-Netzwerk | Retrofit 3 mit OkHttp und Kotlin-Serialization-Konverter | Typisierte HTTP-Verträge, Streaming und abbrechbare Aufrufe über Coroutines; keine Videos vollständig im RAM. |
 | Lokal | Room über SQLite, Flow | Persistente Metadaten, Outbox und Sync-Zustand; Medienbytes liegen als Dateien außerhalb der DB. |
-| Hintergrundarbeit | WorkManager | Dauerhafte, wiederholbare Arbeit unter Android-Netzwerk-/Energiebedingungen; keine Echtzeitgarantie. |
+| Hintergrundarbeit | WorkManager 2.11 | Persistente, eindeutige Sofortarbeit plus 15-minütige Inventarisierung unter Netzwerk-/Speicherbedingungen; keine Echtzeitgarantie. |
 | UI | Jetpack Compose mit ViewModels | Native Android-Oberfläche, beobachtet Room-Zustand. |
+| Lokale Galerie | Android MediaStore über Volume und Bucket | Liest bestehende Ordneralben ohne neue Medienordner anzulegen; unterstützt vollständigen und unter Android 14 eingeschränkten Medienzugriff. |
+| Galerie-Paging | AndroidX Paging 3.3 | Lädt die Medien eines geöffneten Albums in Seiten und begrenzt Cursor- und Objektmengen bei großen Bibliotheken. |
+| Server-Derivate | Sharp 0.35.4/libvips für Bilder; FFmpeg/libx264 für Video | Persistente PostgreSQL-Jobs, atomare Dateien, kompatible WebP- und H.264/MP4-Ausgaben; Profil in [media-derivatives.md](media-derivatives.md). |
+| Vorschaubilder | Coil 3.2 mit Video-Decoder | Decodiert Bilder und Video-Frames auf die angeforderte Kachelgröße statt vollständige Originale als Bitmap in den RAM zu laden. |
 
-Prisma bezeichnet hier die ORM-Bibliothek, nicht einen gehosteten Datenbankdienst. Nur Fastify ist bereits als Laufzeitabhängigkeit eingebunden. Andere Bibliotheken erhalten beim ersten Einsatz feste kompatible Versionen. npm-Lockfile fixiert den Server-Build. Docker-Tags fixieren Major-Versionen, sind aber noch nicht per Digest eingefroren; vor produktiven Releases Digests und Updateprozess ergänzen.
+Prisma bezeichnet hier die ORM-Bibliothek, nicht einen gehosteten Datenbankdienst. Fastify, Prisma ORM/Client und PostgreSQL-Adapter 7.10.0, pg, Pino und Zod sind eingebunden. Zod validiert die Prozesskonfiguration vor dem Start. Andere Bibliotheken erhalten beim ersten Einsatz feste kompatible Versionen. npm-Lockfile fixiert den Server-Build. Docker-Tags fixieren Major-Versionen, sind aber noch nicht per Digest eingefroren; vor produktiven Releases Digests und Updateprozess ergänzen.
 
 ## Datenfluss
 
@@ -28,7 +32,7 @@ flowchart LR
   S --> D[(Externe Festplatte: Originale und Varianten)]
 ```
 
-Ein Backend-Prozess mit Modulen für Identitäten, Alben, Sync und Speicher genügt. Später läuft ein wiederaufnehmbarer Hintergrundjob für Varianten und Papierkorb; zunächst kein Redis oder separater Broker nötig. Jobs liegen in PostgreSQL.
+Ein Backend-Prozess mit Modulen für Identitäten, Alben, Sync und Speicher genügt. Der wiederaufnehmbare Derivatworker läuft im Backend-Prozess; PostgreSQL dient als persistente Queue, ohne Redis oder separaten Broker. Der Papierkorbjob folgt später.
 
 ## Android-Alben und lokale Speicherung
 
@@ -38,15 +42,15 @@ Beide Nutzer wählen unabhängig ihre Quellalben; der Partner erhält Lesezugrif
 
 Partnerdateien werden nicht in MediaStore oder öffentliche Galerieordner geschrieben. Vorschaubilder und kurzfristig benötigte Medien liegen im begrenzten appinternen Cache. Später ausdrücklich angeforderte Offline-Dateien liegen im dauerhaften appinternen Dateiverzeichnis und werden durch Room verwaltet. Android-Auto-Backup und Gerätemigration für Medien, DB und Tokens beim Manifestaufbau ausschließen, damit keine Mediendateien über Systembackups in eine Cloud gelangen.
 
-Spätere Offline-Modi: `none`, `optimized`, `original`. Optimiert nutzt verkleinerte Bilder und Videoableitungen; Original lädt unveränderte gespeicherte Bytes. Limits, LRU für ungebundene Cachedateien und Speicherprüfung verhindern unkontrolliertes Wachstum. Gepinnte Offline-Dateien nicht stillschweigend durch LRU entfernen; unzureichenden Platz sichtbar melden. Formate und Qualitätsstufen sind offen.
+Spätere Offline-Modi: `none`, `optimized`, `original`. Optimiert nutzt verkleinerte Bilder und Videoableitungen; Original lädt unveränderte gespeicherte Bytes. Limits, LRU für ungebundene Cachedateien und Speicherprüfung verhindern unkontrolliertes Wachstum. Gepinnte Offline-Dateien nicht stillschweigend durch LRU entfernen; unzureichenden Platz sichtbar melden. Das aktuelle Offline-Zielformat entspricht dem dokumentierten `optimized`-Profil; Cachebudgets bleiben offen.
 
 ## Speicher und Betrieb
 
-`PHOTOSYNC_MEDIA_PATH` konfiguriert den Hostpfad, im Container ist er `/media/photosync`. Originale, Varianten und temporäre Uploads liegen unter diesem Root; PostgreSQL liegt im eigenen persistenten Docker-Volume. Datenbank speichert relative, servergenerierte Objektschlüssel, keine vom Client vorgegebenen Pfade. Medienzugriff erfolgt über autorisierte API-Routen, kein öffentlicher statischer Dateiserver.
+`PHOTOSYNC_DEV_MEDIA_PATH` und `PHOTOSYNC_PROD_MEDIA_PATH` konfigurieren getrennte Hostpfade. Das Backend wählt über `NODE_ENV` zwischen `MEDIA_DEV_ROOT` und `MEDIA_PROD_ROOT`; Compose mountet nur den jeweiligen Pfad nach `/media/development` beziehungsweise `/media/production`. Die Produktionskonfiguration nutzt außerdem einen separaten Compose-Projektnamen und DB-Volume. Originale, Varianten und temporäre Uploads liegen unter diesem Root; PostgreSQL liegt im eigenen persistenten Docker-Volume. Datenbank speichert relative, servergenerierte Objektschlüssel, keine vom Client vorgegebenen Pfade. Medienzugriff erfolgt über autorisierte API-Routen, kein öffentlicher statischer Dateiserver.
 
 Compose erzeugt einen fehlenden Bind-Pfad nicht automatisch. Vor echten Uploads zusätzlich Mount-Identität/Marker, Schreibbarkeit und freien Platz prüfen: Ein vorhandener leerer Mountpoint beweist keine angeschlossene Festplatte. Bei fehlendem Datenträger Schreibvorgänge und Bereinigungen stoppen; niemals auf Containerdateisystem ausweichen. Temporärdatei und finales Objekt auf demselben Dateisystem erlauben atomare Umbenennung. DB und Dateisystem sind keine gemeinsame Transaktion: gestufte Zustände und ein Reparaturjob sind erforderlich.
 
-Nur der Eigentümer verändert seine Alben und Medien; der Partner liest. Paarzuordnung begrenzt auf zwei aktive Mitglieder. Jede Medien-, Thumbnail- und Downloadanfrage prüft aktuelle Berechtigung. Vor produktivem Zugriff sind Geräteanmeldung, widerrufbare Tokens und HTTPS Pflicht; aktuelles Compose ist nur ein lokales Entwicklungsgerüst. VPN versus öffentlich erreichbarer TLS-Reverse-Proxy bleibt offen.
+Nur der Eigentümer verändert seine Alben und Medien; der Partner liest. Paarzuordnung begrenzt auf zwei aktive Mitglieder. Jede Medien-, Thumbnail- und Downloadanfrage prüft aktuelle Berechtigung. Geräteanmeldung und widerrufbare, serverseitig gehashte Tokens sind implementiert; vor Zugriff über das Netzwerk ist zusätzlich HTTPS einzurichten. Details stehen in [api.md](api.md). VPN versus öffentlich erreichbarer TLS-Reverse-Proxy bleibt offen.
 
 Originale sind unveränderlich. Entfernen eines lokalen Originals oder Abwählen eines Albums löscht keine Serverdatei. Abwählen beendet die Freigabe. Explizites Löschen in PhotoSync verschiebt ein Medium für 30 Tage in den Papierkorb; Partnerzugriff endet sofort. Wiederherstellung bis zur Frist stellt vorhandene Mitgliedschaften wieder her, aber keine widerrufenen Freigaben. Danach löscht ein wiederholbarer Job Original und Varianten; Tombstones bleiben für Sync erhalten.
 
@@ -55,10 +59,10 @@ Private Backups von Datenbank und Festplatte auf getrennte eigene Hardware plane
 ## Offene Entscheidungen vor Implementierung
 
 - Android-Geräteversionen, unterstützte Albumtypen im Gerätetest, SDK-/Gradle-Matrix und EXIF-Standortberechtigung. Ohne diese ist ein unverändertes Original gegebenenfalls nicht vollständig lesbar; keine stillschweigende Originalgarantie.
-- Einrichtung der zwei Konten, Pairing, Tokenlebensdauer und Zugang über VPN oder TLS-Reverse-Proxy.
-- Variantenformate, Videotranscoding, Offline-Budgets, Uploadgrenzen und Mobilfunkregeln.
+- Betreiber-Recovery bei Verlust aller Geräte bzw. der ersten Credential-Antwort und Zugang über VPN oder TLS-Reverse-Proxy. Konten, einmaliges Pairing und dauerhaft widerrufbare Geräte-Tokens sind umgesetzt.
+- HDR-/10-Bit-Tone-Mapping, Offline-Budgets, Uploadgrenzen und Mobilfunkregeln.
 - Festplattenformat/Mountüberwachung, Backup-Retention, Verschlüsselung ruhender Daten und Produktions-Image-Digests.
-- Konkrete Prisma-Version, erste Migration, API-Schemas und Aufbewahrungszeiten des Sync-Protokolls.
+- Fachliche Migrationen, API-Schemas und Aufbewahrungszeiten des Sync-Protokolls. Die technische Baseline ist bereits migrierbar.
 
 ## Offizielle Grundlagen
 

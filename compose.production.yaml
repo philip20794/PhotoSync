@@ -1,0 +1,16 @@
+# Use with: docker compose --env-file .env.production -f compose.yaml -f compose.production.yaml ...
+# Separate project name also separates the PostgreSQL volume and network.
+name: photosync-prod
+services:
+  server:
+    environment:
+      NODE_ENV: production
+    volumes: !override
+      - type: bind
+        source: ${PHOTOSYNC_PROD_MEDIA_PATH:?PHOTOSYNC_PROD_MEDIA_PATH setzen}
+        target: /media/production
+        bind:
+          create_host_path: false
+  migrate:
+    environment:
+      NODE_ENV: production

@@ -1,6 +1,14 @@
 # Sync-Protokoll – Entwurf v1
 
-Noch nicht implementiert; Pfade sind Vorschläge. HTTPS, JSON unter `/v1`, Medien als gestreamte Binärdaten. Server-UUIDs identifizieren Entitäten, UTC-Zeitstempel dienen Anzeige und Fristen, niemals der Konfliktordnung. Große Zähler/Dateigrößen im JSON als Dezimalstrings übertragen.
+Grundlegende Albuminventarisierung, vollständiger Originalupload, asynchrone Serverderivate und Range-Downloads sind implementiert; Change-Log, Cursor, Tombstones und Chunk-Upload bleiben Zielentwurf. HTTPS, JSON unter `/v1`, Medien als gestreamte Binärdaten. Server-UUIDs identifizieren Entitäten, UTC-Zeitstempel dienen Anzeige und Fristen, niemals der Konfliktordnung. Große Zähler/Dateigrößen im JSON als Dezimalstrings übertragen.
+
+## Implementierter Android-Zwischenstand
+
+Ein aktivierter Album-Schalter wird gerätebezogen in Room gespeichert. Ein eindeutiger WorkManager-Auftrag legt oder verknüpft das Serveralbum idempotent, inventarisiert MediaStore batchweise und fügt neue Content-URIs mit stabiler Geräte-/MediaStore-ID in `upload_queue` ein. Eine periodische Arbeit wiederholt die Inventarisierung mindestens im von Android erlaubten 15-Minuten-Raster.
+
+Vor der Metadatenanlage liest Android das Original als Stream und berechnet SHA-256. `clientAssetId` und `expectedSha256` machen den Metadaten-POST wiederholbar. Der Server vergleicht nach dem gestreamten PUT seinen eigenen Hash. `ready` wird lokal dauerhaft gespeichert und nie erneut hochgeladen. Nach Prozessende werden `hashing` und `uploading` zu `retry`; bei einem Netzwerkabbruch beginnt nur das betroffene Original erneut. Es gibt noch keine byteweise Fortsetzung.
+
+Ausschalten setzt den persistenten lokalen Freigabewunsch zurück und serverseitig `sharedAt=NULL`. Damit verschwinden Album und Assets aus allen Partnerabfragen, ohne Eigentümerdaten oder Originale zu löschen.
 
 ## Ablauf
 
@@ -39,4 +47,4 @@ Offline-Clients sehen bereits gespeicherte Inhalte bis zum nächsten Kontakt; ei
 
 401: Anmeldung erneuern; 403/404: keine Berechtigung; 409: Konflikt/Offset; 410: Zustand abgelaufen; 413: zu groß; 429: `Retry-After`; 5xx/Netzausfall: exponentiell mit Jitter wiederholen. Speicherfehler pausieren Uploads ohne Erfolgsmeldung. WorkManager bündelt Arbeit; manuelles Aktualisieren nutzt denselben Sync-Pfad. Keine Push-Cloud erforderlich, zunächst Pull beim Öffnen und periodisch nach Android-Möglichkeiten.
 
-Downloads unterstützen später HTTP Range und einen stabilen ETag pro Variante. Freigabeprüfung gilt auch für Teilanfragen. Original und optimierte Variante besitzen getrennte Prüfsummen und Cache-Schlüssel. Größen, Timeouts und Retry-Budgets müssen vor Featurebau konkretisiert werden.
+Original, Thumbnail und optimierte Variante unterstützen einzelne HTTP-Byte-Ranges und besitzen je einen stabilen, aus SHA-256 gebildeten ETag. Die Freigabeprüfung gilt auch für Teilanfragen. Derivatgrößen, Tool-Timeout und Retry-Budget sind serverseitig festgelegt; das Profil steht in [media-derivatives.md](media-derivatives.md). Mehrfachranges sowie lokale Offline-Budgets folgen später.
