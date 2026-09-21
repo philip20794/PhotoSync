@@ -94,6 +94,8 @@ Dateien liegen unter `derivatives/<ownerId>/<assetId>/<kind>-<claimId>.<ext>`. J
 
 Accounts sind passwortlos; jedes Gerät besitzt ein eigenes zufälliges und widerrufbares Token. In PostgreSQL liegen nur zweckgebundene SHA-256-Hashes. Setup, Pairing und Widerruf sind in [API-Dokumentation](api.md) beschrieben.
 
+Pairing-Codes protokollieren ihren Ursprung. Normal erzeugte Codes referenzieren ihr ausstellendes Gerät; lokale Betreiber-Recovery-Codes besitzen stattdessen `createdByOperator=true` und kein künstliches Gerät. Ein SQL-CHECK erzwingt genau einen Ursprung und beschränkt Operator-Codes auf zusätzliche Geräte bestehender Nutzer. Codehash, TTL, Verbrauch und Widerruf bleiben im gemeinsamen `pairing_codes`-Modell.
+
 Alle Album-/Asset-Routen benötigen ein aktives Gerätetoken. Abfragen werden auf das Pair des authentifizierten Geräts eingeschränkt. Fremde oder noch nicht fertige Partner-Assets liefern 404, damit keine privaten Metadaten oder Uploadzustände offengelegt werden.
 
 ## Android-Room-Modell

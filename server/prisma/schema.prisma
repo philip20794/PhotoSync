@@ -63,7 +63,8 @@ model Device {
 model PairingCode {
   id                String    @id @default(uuid()) @db.Uuid
   pairId            String    @db.Uuid
-  createdByDeviceId String    @db.Uuid
+  createdByDeviceId String?   @db.Uuid
+  createdByOperator Boolean   @default(false)
   targetUserId      String?   @db.Uuid
   purpose           String    @db.VarChar(16)
   codeHash          String    @unique @db.Char(64)
@@ -72,7 +73,7 @@ model PairingCode {
   consumedAt        DateTime? @db.Timestamptz(3)
   revokedAt         DateTime? @db.Timestamptz(3)
   pair              Pair      @relation(fields: [pairId], references: [id], onDelete: Restrict)
-  createdByDevice   Device    @relation(fields: [createdByDeviceId], references: [id], onDelete: Restrict)
+  createdByDevice   Device?   @relation(fields: [createdByDeviceId], references: [id], onDelete: Restrict)
   targetUser        User?     @relation(fields: [targetUserId], references: [id], onDelete: Restrict)
 
   @@index([createdByDeviceId])

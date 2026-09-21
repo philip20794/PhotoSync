@@ -140,7 +140,21 @@ Widerruf setzt `revokedAt`, entfernt den Credential-Hash und widerruft offene Ei
 
 Setup, Codeeinlösung und Codeerstellung sind standardmäßig auf zehn Anfragen je IP und Endpunkt pro Minute begrenzt (`AUTH_RATE_LIMIT_MAX`). Der begrenzte In-Memory-Zähler gilt für einen Backend-Prozess und wird bei Neustart geleert; bei mehreren Replikas einen gemeinsamen Rate-Limit-Speicher ergänzen. Forwarded-IP-Header werden nicht vertraut. Hinter einem Reverse-Proxy teilen sich Clients daher zunächst dessen Limit; Proxy-Vertrauen nur mit enger Proxy-Allowlist konfigurieren.
 
-Die Instanz hat maximal zwei Accounts, aber beliebig viele eigene Geräte. Es gibt noch keine Accountlöschung, Passwort-/Recovery-Anmeldung oder administrative Übernahme fremder Accounts. Mindestens einen funktionierenden Zugang pro Nutzer behalten. Wer alle Geräte widerruft oder verliert, benötigt einen späteren lokalen Betreiber-Recovery-Workflow. Die Ersteinrichtung darf dafür nicht erneut freigeschaltet werden.
+Die Instanz hat maximal zwei Accounts, aber beliebig viele eigene Geräte. Es gibt keine Accountlöschung, Passwort-/Recovery-Anmeldung oder administrative Übernahme über HTTP. Die Ersteinrichtung darf für Recovery nicht erneut freigeschaltet werden.
+
+### Lokales Betreiber-Recovery
+
+Falls kein angemeldetes Gerät mehr verfügbar ist, erzeugt ausschließlich der lokale Operator-Prozess im laufenden Servercontainer einen normalen Einmalcode für ein weiteres Gerät:
+
+```bash
+docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env \
+  -f compose.yaml -f compose.production.yaml \
+  exec server npm run --silent operator -- create-pairing-code --user <user-uuid>
+```
+
+Alternativ ist eine exakte Auswahl über `--display-name <anzeigename>` möglich. Kein Treffer und mehrere Nutzer mit demselben Anzeigenamen brechen ohne Schreibvorgang ab. Die User-ID ist deshalb für den Produktionsbetrieb vorzuziehen.
+
+Der Befehl besitzt keine HTTP-Route und benötigt direkten lokalen Zugriff auf Containerumgebung und Datenbank. Er gibt bei Erfolg ausschließlich Nutzer, Klartextcode und Gültigkeitsdauer aus. Der Klartext erscheint nur in dieser angehängten Terminalausgabe. In PostgreSQL bleiben ausschließlich sein zweckgebundener Hash und auditierbare Erzeugungsmetadaten (`createdByOperator=true`) erhalten; normale Serverlogs erhalten keinen Code. Operator-Codes nutzen dieselbe konfigurierte TTL, Transaktionssperre, Einmalverwendung und Einlösung über `POST /v1/auth/pair` wie geräteerzeugte Codes.
 
 Da rohe Credentials nicht gespeichert werden, können verlorene Erfolgsantworten nicht erneut abgerufen werden. Bei einem zusätzlichen Gerät von einem vorhandenen Gerät aus einen neuen Code erzeugen und den verwaisten Zugang widerrufen. Geht die allererste Setup-/Partner-Erfolgsantwort verloren, ist ebenfalls Betreiber-Recovery erforderlich. HTTP-Clients dürfen fehlgeschlagene Einlösungen daher nicht als erfolgreich behandeln oder unbemerkt neue Accounts erwarten.
 
@@ -148,7 +162,7 @@ DB-Backups enthalten nur Credential-/Code-Hashes, aber weiterhin private Metadat
 
 ## Health
 
-`GET /health/live` ist eine von Datenbank, Medienpfad und Konvertierungsqueue unabhängige Liveness-Antwort. `GET /health` bleibt ebenfalls ohne Token erreichbar und prüft Schema-Version 9, Medienverzeichnis sowie bei aktiviertem Worker die Verfügbarkeit von `ffmpeg` und `ffprobe`. Fehlende harte Voraussetzungen liefern **503**. Die Antwort enthält zusätzlich Queuezahlen. Ein großer Rückstand oder ein über Tool-Timeout hinaus festhängender Job erscheint als `derivatives: "degraded"`, bleibt aber **200**, damit ein Neustart die persistente Queue nicht verschlimmert. Keine Accounts, Geräte oder Credentials werden ausgegeben.
+`GET /health/live` ist eine von Datenbank, Medienpfad und Konvertierungsqueue unabhängige Liveness-Antwort. `GET /health` bleibt ebenfalls ohne Token erreichbar und prüft Schema-Version 12, Medienverzeichnis sowie bei aktiviertem Worker die Verfügbarkeit von `ffmpeg` und `ffprobe`. Fehlende harte Voraussetzungen liefern **503**. Die Antwort enthält zusätzlich Queuezahlen. Ein großer Rückstand oder ein über Tool-Timeout hinaus festhängender Job erscheint als `derivatives: "degraded"`, bleibt aber **200**, damit ein Neustart die persistente Queue nicht verschlimmert. Keine Accounts, Geräte oder Credentials werden ausgegeben.
 
 Offizielle Grundlagen: [Node.js Crypto](https://nodejs.org/docs/latest-v24.x/api/crypto.html), [Fastify Auth-Hooks](https://fastify.dev/docs/latest/Reference/Hooks/), [Rate-Limit-Plugin](https://github.com/fastify/fastify-rate-limit), [Prisma-Transaktionen](https://docs.prisma.io/docs/orm/v7/prisma-client/queries/transactions).
 

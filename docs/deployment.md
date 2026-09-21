@@ -77,6 +77,16 @@ Der Service verlangt den Datenträgermount und die Env-Datei. Die Datenbank ver�
 docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml ps
 ```
 
+Verliert ein bestehender Nutzer alle lokalen Geräte-Credentials, wird nach dem Upgrade ein kurzlebiger Einmalcode direkt im Servercontainer erzeugt:
+
+```bash
+docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env \
+  -f compose.yaml -f compose.production.yaml \
+  exec server npm run --silent operator -- create-pairing-code --user <user-uuid>
+```
+
+Der Befehl verändert keine Nutzer-, Geräte- oder Mediendaten und ist nicht per HTTP erreichbar. Details, Anzeigenamenauswahl und Auditverhalten stehen unter [Lokales Betreiber-Recovery](api.md#lokales-betreiber-recovery).
+
 ## Reverse Proxy und HTTPS
 
 Nginx Proxy Manager (NPM) ist der einzige öffentliche Einstieg (TCP 80/443). Das vorhandene `gandalf-home.duckdns.org` zeigt auf Home Assistant und kann nicht zugleich PhotoSync bedienen. Zuerst eine **eigene** DuckDNS-Subdomain bzw. einen eigenen DNS-Namen für PhotoSync anlegen und den DuckDNS-Updater entsprechend ergänzen. Danach einmalig das isolierte Netzwerk anlegen und NPM daran anschließen:

@@ -61,7 +61,7 @@ Private Backups von Datenbank und Festplatte auf getrennte eigene Hardware plane
 ## Offene Entscheidungen vor Implementierung
 
 - Android-Geräteversionen, unterstützte Albumtypen im Gerätetest, SDK-/Gradle-Matrix und EXIF-Standortberechtigung. Ohne diese ist ein unverändertes Original gegebenenfalls nicht vollständig lesbar; keine stillschweigende Originalgarantie.
-- Betreiber-Recovery bei Verlust aller Geräte bzw. der ersten Credential-Antwort und Zugang über VPN oder TLS-Reverse-Proxy. Konten, einmaliges Pairing und dauerhaft widerrufbare Geräte-Tokens sind umgesetzt.
+- Zugang über VPN oder TLS-Reverse-Proxy. Lokales Betreiber-Recovery bei Verlust aller Geräte ist über einen ausschließlich im Servercontainer verfügbaren CLI-Befehl umgesetzt; es erzeugt auditierbare, gehashte Einmalcodes ohne öffentlichen Admin-Endpunkt.
 - HDR-/10-Bit-Tone-Mapping, Offline-Budgets, Uploadgrenzen und Mobilfunkregeln.
 - Festplattenformat/Mountüberwachung, Backup-Retention, Verschlüsselung ruhender Daten und Produktions-Image-Digests.
 - Fachliche Migrationen, API-Schemas und Aufbewahrungszeiten des Sync-Protokolls. Die technische Baseline ist bereits migrierbar.

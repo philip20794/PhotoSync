@@ -1,9 +1,11 @@
-import type { Prisma, PrismaClient } from '../generated/prisma/client.js';
+import type { PrismaClient } from '../generated/prisma/client.js';
 import type { Config } from '../config.js';
 import { ApiError } from '../errors.js';
-import { hashSecret, matchesSetupToken, newDeviceToken, newPairingCode, normalizePairingCode } from './secrets.js';
+import { hashSecret, matchesSetupToken, newDeviceToken, normalizePairingCode } from './secrets.js';
+import { withAuthLock, type AuthTransaction } from './locking.js';
+import { persistPairingCode } from './pairing.js';
 
-type Tx = Prisma.TransactionClient;
+type Tx = AuthTransaction;
 export type Principal = { userId: string; deviceId: string; pairId: string };
 export type Enrollment = { displayName?: string; deviceName: string };
 const unauthorized = () => new ApiError(401, 'UNAUTHORIZED', 'Valid device credentials required');
@@ -14,16 +16,7 @@ const deviceView = (device: { id: string; name: string; createdAt: Date; revoked
   ({ id: device.id, name: device.name, createdAt: device.createdAt, revokedAt: device.revokedAt });
 
 export function createAuthService(client: PrismaClient, config: Config) {
-  // All onboarding/revocation writes serialize on the existing singleton row.
-  // READ COMMITTED then sees the previous lock holder's committed state.
-  async function locked<T>(action: (tx: Tx, pairId: string, now: Date) => Promise<T>): Promise<T> {
-    return client.$transaction(async (tx) => {
-      const rows = await tx.$queryRaw<{ id: string }[]>`SELECT "id" FROM "pairs" WHERE "singleton" = 1 FOR UPDATE`;
-      if (!rows[0]) throw new Error('Missing instance row');
-      const times = await tx.$queryRaw<{ now: Date }[]>`SELECT clock_timestamp() AS now`;
-      return action(tx, rows[0].id, times[0]!.now);
-    }, { maxWait: 5000, timeout: 10000 });
-  }
+  const locked = <T>(action: (tx: Tx, pairId: string, now: Date) => Promise<T>) => withAuthLock(client, action);
   async function requireActive(tx: Tx, principal: Principal) {
     const actor = await tx.device.findFirst({ where: {
       id: principal.deviceId, userId: principal.userId, revokedAt: null,
@@ -72,14 +65,10 @@ export function createAuthService(client: PrismaClient, config: Config) {
         if (purpose === 'partner' && await tx.user.count({ where: { pairId } }) >= 2) {
           throw new ApiError(409, 'PAIR_FULL', 'Both accounts already exist');
         }
-        const code = newPairingCode();
-        const record = await tx.pairingCode.create({ data: {
-          pairId, purpose, createdByDeviceId: principal.deviceId,
+        return persistPairingCode(tx, config, now, {
+          pairId, purpose, createdByDeviceId: principal.deviceId, createdByOperator: false,
           targetUserId: purpose === 'device' ? principal.userId : null,
-          codeHash: hashSecret(normalizePairingCode(code)!, 'pairing'),
-          createdAt: now, expiresAt: new Date(now.getTime() + config.pairingCodeTtlSeconds * 1000),
-        } });
-        return { id: record.id, code, purpose, expiresAt: record.expiresAt };
+        });
       });
     },
 
@@ -89,8 +78,9 @@ export function createAuthService(client: PrismaClient, config: Config) {
       return locked(async (tx, pairId, now) => {
         const record = await tx.pairingCode.findUnique({ where: { codeHash: hashSecret(normalized, 'pairing') },
           include: { createdByDevice: { include: { user: true } } } });
-        if (!record || record.pairId !== pairId || record.consumedAt || record.revokedAt ||
-            record.expiresAt <= now || record.createdByDevice.revokedAt) throw invalidCode();
+        if (!record || record.pairId !== pairId || record.consumedAt || record.revokedAt || record.expiresAt <= now ||
+            (record.createdByOperator ? record.createdByDeviceId !== null
+              : !record.createdByDevice || record.createdByDevice.revokedAt)) throw invalidCode();
         let user;
         if (record.purpose === 'partner') {
           if (!body.displayName) throw new ApiError(400, 'INVALID_REQUEST', 'Partner displayName is required');
@@ -100,7 +90,7 @@ export function createAuthService(client: PrismaClient, config: Config) {
           user = await tx.user.create({ data: { pairId, memberSlot: 2, displayName: body.displayName } });
         } else {
           if (body.displayName !== undefined) throw new ApiError(400, 'INVALID_REQUEST', 'Device pairing does not change the account');
-          if (record.targetUserId !== record.createdByDevice.userId) throw invalidCode();
+          if (!record.createdByOperator && record.targetUserId !== record.createdByDevice!.userId) throw invalidCode();
           user = await tx.user.findFirst({ where: { id: record.targetUserId!, pairId } });
           if (!user) throw invalidCode();
         }
