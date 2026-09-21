@@ -8,11 +8,19 @@ import type { MediaService } from './service.js';
 
 const idParams = z.object({ id: z.uuid() }).strict();
 const albumIdParams = z.object({ albumId: z.uuid() }).strict();
+const assetPageQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(60),
+  cursor: z.string().min(1).max(256).optional(),
+}).strict();
 const albumBody = z.object({
   clientAlbumId: z.string().trim().min(1).max(255),
   title: z.string().trim().min(1).max(200),
+  shared: z.boolean().default(true),
+  backedUp: z.boolean().default(false),
 }).strict();
 const albumSharingBody = z.object({ shared: z.boolean() }).strict();
+const trashIdsBody = z.object({ assetIds: z.array(z.uuid()).min(1).max(1000) }).strict();
+const trashBulkBody = z.object({ assetIds: z.array(z.uuid()).max(1000).optional() }).strict();
 const decimal = z.string().regex(/^(?:0|[1-9]\d*)$/).transform(BigInt);
 const mime = z.string().trim().toLowerCase().regex(/^(?:image|video)\/[a-z0-9][a-z0-9!#$&^_.+\-]*$/).max(127);
 const assetBody = z.object({
@@ -41,6 +49,18 @@ function parse<T>(schema: z.ZodType<T>, input: unknown): T {
   const result = schema.safeParse(input);
   if (!result.success) throw new ApiError(400, 'INVALID_REQUEST', 'Invalid request');
   return result.data;
+}
+
+function parseAssetPage(input: unknown): { limit: number; cursor?: { createdAt: Date; id: string } } {
+  const query = parse(assetPageQuery, input);
+  if (!query.cursor) return { limit: query.limit };
+  try {
+    const decoded = JSON.parse(Buffer.from(query.cursor, 'base64url').toString('utf8'));
+    const value = z.object({ createdAt: z.iso.datetime({ offset: true }), id: z.uuid() }).strict().parse(decoded);
+    return { limit: query.limit, cursor: { createdAt: new Date(value.createdAt), id: value.id } };
+  } catch {
+    throw new ApiError(400, 'INVALID_REQUEST', 'Invalid asset cursor');
+  }
 }
 
 function contentDisposition(fileName: string, disposition: 'attachment' | 'inline'): string {
@@ -72,8 +92,9 @@ function byteRange(value: string | undefined, size: number): { start: number; en
 }
 
 async function sendMedia(request: FastifyRequest, reply: FastifyReply, service: MediaService,
-  id: string, variant: 'original' | 'thumbnail' | 'optimized') {
-  const file = await service.mediaFile(request.principal!, id, variant);
+  id: string, variant: 'original' | 'thumbnail' | 'optimized', trash = false) {
+  const file = trash ? await service.trashThumbnail(request.principal!, id)
+    : await service.mediaFile(request.principal!, id, variant);
   let range;
   try { range = byteRange(typeof request.headers.range === 'string' ? request.headers.range : undefined, file.size); }
   catch (error) {
@@ -106,6 +127,34 @@ export function registerMediaRoutes(app: FastifyInstance, config: Config, media:
 
   app.get('/v1/albums', async (request) => service().listAlbums(request.principal!));
 
+  // The partner tab deliberately uses this narrower endpoint instead of filtering the
+  // caller's own albums in the client.
+  app.get('/v1/partner/albums', async (request) => service().listPartnerAlbums(request.principal!));
+
+  app.get('/v1/trash', async (request) => service().listTrash(request.principal!));
+
+  app.post('/v1/trash/assets/:id/restore', async (request) =>
+    service().restoreTrashAsset(request.principal!, parse(idParams, request.params).id));
+  app.get('/v1/trash/assets/:id/thumbnail', async (request, reply) =>
+    sendMedia(request, reply, service(), parse(idParams, request.params).id, 'thumbnail', true));
+
+
+  app.post('/v1/trash/restore', async (request) => service().restoreTrashAssets(
+    request.principal!, parse(trashIdsBody, request.body).assetIds,
+  ));
+
+  app.delete('/v1/trash/assets/:id', async (request) =>
+    service().purgeTrashAsset(request.principal!, parse(idParams, request.params).id));
+
+  app.delete('/v1/trash/assets', async (request) => service().purgeTrashAssets(
+    request.principal!, parse(trashIdsBody, request.body).assetIds,
+  ));
+
+  app.delete('/v1/trash', async (request) => {
+    const ids = parse(trashBulkBody, request.body ?? {}).assetIds;
+    return service().purgeTrashAssets(request.principal!, ids && ids.length > 0 ? ids : undefined);
+  });
+
   app.get('/v1/albums/:id', async (request) =>
     service().getAlbum(request.principal!, parse(idParams, request.params).id));
 
@@ -124,12 +173,50 @@ export function registerMediaRoutes(app: FastifyInstance, config: Config, media:
     )));
 
   app.get('/v1/albums/:albumId/assets', async (request) =>
-    service().listAssets(request.principal!, parse(albumIdParams, request.params).albumId));
+    service().listAssets(request.principal!, parse(albumIdParams, request.params).albumId, parseAssetPage(request.query)));
 
   app.get('/v1/assets/:id', async (request) =>
     service().getAsset(request.principal!, parse(idParams, request.params).id));
 
-  app.put('/v1/assets/:id/original', { bodyLimit: config.maxUploadBytes }, async (request, reply) => {
+  app.delete('/v1/assets/:id', async (request) =>
+    service().trashAsset(request.principal!, parse(idParams, request.params).id));
+
+  app.delete('/v1/assets/:id/upload', async (request) =>
+    service().cancelUpload(request.principal!, parse(idParams, request.params).id));
+
+  app.post('/v1/assets/:id/upload-session', async (request, reply) =>
+    reply.code(200).send(await service().createUploadSession(
+      request.principal!, parse(idParams, request.params).id,
+    )));
+
+  app.patch('/v1/upload-sessions/:id', {
+    bodyLimit: config.maxUploadChunkBytes,
+    config: { longRunningUpload: true },
+  }, async (request, reply) => {
+    if (request.headers['content-type'] !== 'application/octet-stream') {
+      throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Use application/octet-stream');
+    }
+    const lengthValue = request.headers['content-length'];
+    const offsetValue = request.headers['upload-offset'];
+    if (typeof lengthValue !== 'string' || !/^\d+$/.test(lengthValue) ||
+        typeof offsetValue !== 'string' || !/^\d+$/.test(offsetValue)) {
+      throw new ApiError(400, 'INVALID_UPLOAD_HEADERS', 'Content-Length and Upload-Offset are required');
+    }
+    const length = Number(lengthValue);
+    const offset = BigInt(offsetValue);
+    if (!Number.isSafeInteger(length) || length <= 0 || length > config.maxUploadChunkBytes) {
+      throw new ApiError(413, 'UPLOAD_CHUNK_TOO_LARGE', 'Upload chunk exceeds configured limit');
+    }
+    return reply.code(200).send(await service().uploadChunk(
+      request.principal!,
+      parse(idParams, request.params).id,
+      offset,
+      request.body as Readable,
+      length,
+    ));
+  });
+
+  app.put('/v1/assets/:id/original', { bodyLimit: config.maxUploadBytes, config: { longRunningUpload: true } }, async (request, reply) => {
     if (request.headers['content-type'] !== 'application/octet-stream') {
       throw new ApiError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Use application/octet-stream');
     }

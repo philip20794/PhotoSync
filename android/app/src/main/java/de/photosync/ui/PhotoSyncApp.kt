@@ -39,8 +39,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import de.photosync.BuildConfig
 import de.photosync.domain.model.SessionState
 import de.photosync.ui.gallery.LocalGallery
+import de.photosync.ui.partner.PartnerGallery
+import de.photosync.ui.settings.SettingsScreen
+import de.photosync.ui.trash.TrashScreen
 
 private object Route {
     const val SERVER = "server"
@@ -96,18 +100,19 @@ private fun LoadingScreen() = Screen { CircularProgressIndicator() }
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ServerScreen(state: AppUiState, viewModel: AppViewModel) {
-    var address by rememberSaveable { mutableStateOf("") }
+    var address by rememberSaveable { mutableStateOf(BuildConfig.DEFAULT_SERVER_URL) }
     Scaffold(topBar = { TopAppBar(title = { Text("PhotoSync verbinden") }) }) { padding ->
         Screen(padding) {
             Text("Serveradresse", style = MaterialTheme.typography.headlineSmall)
-            Text("Für Geräte außerhalb des Heimnetzes HTTPS verwenden.")
+            Text(if (BuildConfig.IS_PRODUCTION) "Produktionsserver (HTTPS)" else "Für Geräte außerhalb des Heimnetzes HTTPS verwenden.")
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = address,
-                onValueChange = { address = it },
+                onValueChange = { if (!BuildConfig.IS_PRODUCTION) address = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                label = { Text("https://photosync.example") },
+                readOnly = BuildConfig.IS_PRODUCTION,
+                label = { Text(if (BuildConfig.IS_PRODUCTION) "https://philsync.duckdns.org" else "https://photosync.example") },
             )
             Spacer(Modifier.height(16.dp))
             Button(
@@ -191,15 +196,20 @@ private fun HomeScreen(state: AppUiState, viewModel: AppViewModel, applicationCo
             TabRow(selectedTabIndex = selectedTab) {
                 Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }, text = { Text("Mein Handy") })
                 Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }, text = { Text("Partner") })
+                Tab(selected = selectedTab == 2, onClick = { selectedTab = 2 }, text = { Text("Papierkorb") })
+                Tab(selected = selectedTab == 3, onClick = { selectedTab = 3 }, text = { Text("Einstellungen") })
             }
             if (selectedTab == 0) {
                 LocalGallery(applicationContext, session.deviceId)
+            } else if (selectedTab == 1) {
+                val authenticated = state.session as SessionState.Authenticated
+                PartnerGallery(applicationContext, authenticated.server.baseUrl, authenticated.session.userId)
+            } else if (selectedTab == 2) {
+                val authenticated = state.session as SessionState.Authenticated
+                TrashScreen(applicationContext, authenticated.server.baseUrl, authenticated.session.userId)
             } else {
-                Screen(PaddingValues(24.dp)) {
-                    Text("Partner", style = MaterialTheme.typography.headlineSmall)
-                    Text("Geteilte Alben erscheinen hier, sobald die Partnergalerie umgesetzt ist.")
-                    Feedback(state)
-                }
+                val authenticated = state.session as SessionState.Authenticated
+                SettingsScreen(applicationContext, authenticated.server.baseUrl, authenticated.session.userId)
             }
         }
     }

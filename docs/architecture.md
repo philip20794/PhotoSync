@@ -1,19 +1,19 @@
 # Architektur
 
-Stand: 14.09.2026. Zielentwurf mit implementierter Backend-Basis: Environment-Validierung, Prisma-Migrationen, JSON-Logging, zentrale Fehlerbehandlung und Readiness unter `/health`. Gerätebasierte Authentifizierung, Zwei-Personen-Setup und Einmal-Pairing sind implementiert. Album- und Assetmetadaten sowie atomarer Original-Upload und -Download sind implementiert. Die Android-App besitzt eine paginierte MediaStore-Galerie und eine grundlegende persistente Original-Upload-Queue für freigegebene Alben; serverseitige Bild-/Videoderivate und Range-Streaming sind implementiert; Partnergalerie und Papierkorb folgen später.
+Stand: 20.09.2026. Geräteauthentifizierung, Album-/Assetmetadaten, resumierbare und atomar finalisierte Originaluploads, resumierbare Offline-Downloads, geleaste Serverderivate, Partnergalerie, privates Auto-Backup sowie 90-Tage-Papierkorb und Restore sind implementiert. MediaStore-Hinweise und Kontrollscan speisen eine gemeinsame persistente Queue; WorkManager synchronisiert mit Netzwerk-Backoff. Ein transaktionales Serverjournal wird über persistente Room-Cursor verarbeitet. Optionales FCM beschleunigt nur das Aufwecken.
 
 ## Umfang und Entscheidungen
 
-Zwei Nutzer mit zunächst je einem Android-Gerät teilen ausgewählte vorhandene Alben in beide Richtungen. Ein privater Ubuntu-Server ist die autoritative Quelle für Freigaben, Metadaten und gespeicherte Medien. Kein Cloud-Medienspeicher, kein externer Bildproxy, kein Firebase. Android ausschließlich Kotlin und Jetpack Compose.
+Zwei Nutzer mit zunächst je einem Android-Gerät teilen ausgewählte vorhandene Alben in beide Richtungen. Ein privater Ubuntu-Server ist die autoritative Quelle für Freigaben, Metadaten und gespeicherte Medien. Kein Cloud-Medienspeicher und kein externer Bildproxy; Firebase Cloud Messaging ist optional und transportiert ausschließlich einen inhaltslosen Sync-Wakeup. Android ausschließlich Kotlin und Jetpack Compose.
 
 | Bereich | Entscheidung | Begründung |
 | --- | --- | --- |
 | Backend | Node.js 24 LTS, TypeScript, Fastify 5 | Kleine modulare HTTP-Anwendung, TypeScript-Unterstützung und Schema-Validierung; kein Microservice-Betrieb nötig. |
 | Datenbank | PostgreSQL 17 in Docker | Transaktionen, Constraints, zuverlässige relationale Zuordnung. |
 | DB-Zugriff | Prisma ORM | Typisierter Client und versionierte SQL-Migrationen; komplexe Sync-Sperren bei Bedarf über parametrisierte SQL-Abfragen in derselben Transaktion. |
-| Android-Netzwerk | Retrofit 3 mit OkHttp und Kotlin-Serialization-Konverter | Typisierte HTTP-Verträge, Streaming und abbrechbare Aufrufe über Coroutines; keine Videos vollständig im RAM. |
+| Android-Netzwerk | Retrofit 3 mit OkHttp und Kotlin-Serialization-Konverter | Typisierte HTTP-Verträge, Streaming und abbrechbare Aufrufe über Coroutines; keine Videos vollständig im RAM. Große Transfers können persistent auf unmetered/WLAN begrenzt werden, Steuerdaten bleiben mit CONNECTED möglich. |
 | Lokal | Room über SQLite, Flow | Persistente Metadaten, Outbox und Sync-Zustand; Medienbytes liegen als Dateien außerhalb der DB. |
-| Hintergrundarbeit | WorkManager 2.11 | Persistente, eindeutige Sofortarbeit plus 15-minütige Inventarisierung unter Netzwerk-/Speicherbedingungen; keine Echtzeitgarantie. |
+| Hintergrundarbeit | WorkManager 2.11 | Persistente eindeutige Sofortarbeit, MediaStore-Trigger, netzunabhängiger Kontrollscan und Netzwerkabgleich mit Backoff; keine Echtzeitgarantie. |
 | UI | Jetpack Compose mit ViewModels | Native Android-Oberfläche, beobachtet Room-Zustand. |
 | Lokale Galerie | Android MediaStore über Volume und Bucket | Liest bestehende Ordneralben ohne neue Medienordner anzulegen; unterstützt vollständigen und unter Android 14 eingeschränkten Medienzugriff. |
 | Galerie-Paging | AndroidX Paging 3.3 | Lädt die Medien eines geöffneten Albums in Seiten und begrenzt Cursor- und Objektmengen bei großen Bibliotheken. |
@@ -26,33 +26,35 @@ Prisma bezeichnet hier die ORM-Bibliothek, nicht einen gehosteten Datenbankdiens
 
 ```mermaid
 flowchart LR
-  A[Android A: Compose / Room] <-->|HTTPS: Metadaten und Medien| S[Ubuntu: Fastify]
-  B[Android B: Compose / Room] <-->|HTTPS: Metadaten und Medien| S
+  A[Android A: Compose / Room / WorkManager] <-->|HTTPS: Change Feed und Medien| S[Ubuntu: Fastify]
+  B[Android B: Compose / Room / WorkManager] <-->|HTTPS: Change Feed und Medien| S
   S --> P[(PostgreSQL: Metadaten)]
   S --> D[(Externe Festplatte: Originale und Varianten)]
 ```
 
-Ein Backend-Prozess mit Modulen für Identitäten, Alben, Sync und Speicher genügt. Der wiederaufnehmbare Derivatworker läuft im Backend-Prozess; PostgreSQL dient als persistente Queue, ohne Redis oder separaten Broker. Der Papierkorbjob folgt später.
+Ein Backend-Prozess mit Modulen für Identitäten, Alben, Sync und Speicher genügt. Der wiederaufnehmbare Derivatworker, der idempotente Papierkorb-Cleanup und optional der FCM-Wakeup-Absender laufen im Backend-Prozess; PostgreSQL dient als persistente Queue und Change-Journal, ohne Redis oder separaten Broker.
 
 ## Android-Alben und lokale Speicherung
 
 MediaStore liefert zugängliche Bilder/Videos; Ordneralben werden über Volume und Bucket zugeordnet, nie nur über ihren Namen. Herstelleralben, virtuelle Alben und ausschließlich in einer fremden Cloud vorhandene Dateien sind nicht automatisch abbildbar. Die erste Version unterstützt lokal zugängliche MediaStore-Ordneralben. Der Photo Picker allein ermöglicht keine dauerhafte Beobachtung ganzer Alben.
 
-Beide Nutzer wählen unabhängig ihre Quellalben; der Partner erhält Lesezugriff innerhalb PhotoSync. Neu gefundene Medien eines ausgewählten Albums werden später automatisch berücksichtigt. Berechtigungsentzug, eingeschränkter Fotozugriff und nicht verfügbare Volumes sind keine Löschsignale. Änderungen der MediaStore-Version erfordern erneute Inventarisierung. Android-IDs gelten nur innerhalb des Geräts und der aktuellen Zuordnung.
+Beide Nutzer wählen unabhängig ihre Quellalben; der Partner erhält Lesezugriff innerhalb PhotoSync. Neu gefundene oder geänderte Medien eines ausgewählten Albums werden durch Änderungshinweis oder spätestens einen späteren Kontrollscan berücksichtigt. Berechtigungsentzug, eingeschränkter Fotozugriff und nicht verfügbare Volumes sind keine Löschsignale. Änderungen der MediaStore-Version erfordern erneute Inventarisierung. Android-IDs gelten nur innerhalb des Geräts und der aktuellen Zuordnung.
 
-Partnerdateien werden nicht in MediaStore oder öffentliche Galerieordner geschrieben. Vorschaubilder und kurzfristig benötigte Medien liegen im begrenzten appinternen Cache. Später ausdrücklich angeforderte Offline-Dateien liegen im dauerhaften appinternen Dateiverzeichnis und werden durch Room verwaltet. Android-Auto-Backup und Gerätemigration für Medien, DB und Tokens beim Manifestaufbau ausschließen, damit keine Mediendateien über Systembackups in eine Cloud gelangen.
+Partnerdateien werden nicht in MediaStore oder öffentliche Galerieordner geschrieben. Vorschaubilder und kurzfristig benötigte Medien liegen im begrenzten appinternen Cache. Ausdrücklich angeforderte Offline-Dateien liegen im dauerhaften appinternen Dateiverzeichnis und werden durch Room verwaltet. Android-Auto-Backup und Gerätemigration für Medien, DB und Tokens sind ausgeschlossen, damit keine Mediendateien über Systembackups in eine Cloud gelangen.
 
-Spätere Offline-Modi: `none`, `optimized`, `original`. Optimiert nutzt verkleinerte Bilder und Videoableitungen; Original lädt unveränderte gespeicherte Bytes. Limits, LRU für ungebundene Cachedateien und Speicherprüfung verhindern unkontrolliertes Wachstum. Gepinnte Offline-Dateien nicht stillschweigend durch LRU entfernen; unzureichenden Platz sichtbar melden. Das aktuelle Offline-Zielformat entspricht dem dokumentierten `optimized`-Profil; Cachebudgets bleiben offen.
+Offline-Modi: `none`, `optimized`, `original`. Optimiert nutzt verkleinerte Bilder und Videoableitungen; Original lädt unveränderte gespeicherte Bytes. Limits, LRU für ungebundene Cachedateien und Speicherprüfung verhindern unkontrolliertes Wachstum. Gepinnte Offline-Dateien werden nicht durch LRU entfernt; unzureichender Platz bleibt als wiederholbarer Fehler sichtbar.
+
+Die normale Albumansicht kennt weiterhin nur „mit Partner geteilt“ oder „nicht geteilt“. Auto-Backup ist eine interne Einstellung und ein serverseitiger Marker (backedUpAt), kein dritter sichtbarer Albumstatus. Bei aktivem Auto-Backup inventarisiert der Kontrollscan alle sichtbaren Bilder/Videos, nutzt dieselbe Room-Queue und dieselbe idempotente Album-/Asset-Identität. Das Backup bleibt privat, bis der Eigentümer ausdrücklich teilt. Ausschalten stoppt nur neue private Sicherungen; vorhandene Backups und ausdrücklich geteilte Alben bleiben bestehen. Die Settings-Seite zeigt außerdem Profil, Partnerstatus, WLAN-only, Cache-/Offline-Speicher, Syncstatus und Fehlerbenachrichtigung.
 
 ## Speicher und Betrieb
 
-`PHOTOSYNC_DEV_MEDIA_PATH` und `PHOTOSYNC_PROD_MEDIA_PATH` konfigurieren getrennte Hostpfade. Das Backend wählt über `NODE_ENV` zwischen `MEDIA_DEV_ROOT` und `MEDIA_PROD_ROOT`; Compose mountet nur den jeweiligen Pfad nach `/media/development` beziehungsweise `/media/production`. Die Produktionskonfiguration nutzt außerdem einen separaten Compose-Projektnamen und DB-Volume. Originale, Varianten und temporäre Uploads liegen unter diesem Root; PostgreSQL liegt im eigenen persistenten Docker-Volume. Datenbank speichert relative, servergenerierte Objektschlüssel, keine vom Client vorgegebenen Pfade. Medienzugriff erfolgt über autorisierte API-Routen, kein öffentlicher statischer Dateiserver.
+`PHOTOSYNC_DEV_MEDIA_PATH` und `PHOTOSYNC_PROD_MEDIA_PATH` konfigurieren getrennte Hostpfade. Das Backend wählt über `NODE_ENV` zwischen `MEDIA_DEV_ROOT` und `MEDIA_PROD_ROOT`; Compose mountet nur den jeweiligen Pfad nach `/media/development` beziehungsweise `/media/production`. Auch Upload-Sitzungen speichern ausschließlich relative Pfade unter diesem Root, sodass die spätere 4-TB-Platte keine Codeänderung benötigt. PostgreSQL liegt im eigenen persistenten Docker-Volume. Medienzugriff erfolgt über autorisierte API-Routen, kein öffentlicher statischer Dateiserver. Optional ergänzt `CATALOG_ROOT` eine ausschließlich lokale, regenerierbare Host-Projektion: `Alben/` enthält alle gültigen aktiven Originale je Eigentümer, `Auto-Backup/` zusätzlich alle privaten Backup-Zuordnungen und `Papierkorb/` die noch wiederherstellbaren Originale. Diese Einträge sind Symlinks, keine Kopien; weder Fastify noch der Reverse Proxy mounten oder veröffentlichen sie als HTTP-Ressource.
 
-Compose erzeugt einen fehlenden Bind-Pfad nicht automatisch. Vor echten Uploads zusätzlich Mount-Identität/Marker, Schreibbarkeit und freien Platz prüfen: Ein vorhandener leerer Mountpoint beweist keine angeschlossene Festplatte. Bei fehlendem Datenträger Schreibvorgänge und Bereinigungen stoppen; niemals auf Containerdateisystem ausweichen. Temporärdatei und finales Objekt auf demselben Dateisystem erlauben atomare Umbenennung. DB und Dateisystem sind keine gemeinsame Transaktion: gestufte Zustände und ein Reparaturjob sind erforderlich.
+Compose erzeugt einen fehlenden Bind-Pfad nicht automatisch. Vor echten Uploads zusätzlich Mount-Identität/Marker, Schreibbarkeit und freien Platz prüfen: Ein vorhandener leerer Mountpoint beweist keine angeschlossene Festplatte. Bei fehlendem Datenträger Schreibvorgänge und Bereinigungen stoppen; niemals auf Containerdateisystem ausweichen. Temporärdatei und finales Objekt auf demselben Dateisystem erlauben atomare Umbenennung. DB und Dateisystem sind keine gemeinsame Transaktion. Persistente Sitzungsoffsets, erneuerte Leases und Recovery schließen beide Crashfenster: unbestätigte Part-Bytes werden zurückgekürzt, ein bereits umbenanntes vollständiges Original wird fertig committed. Derivatworker erneuern eigene Ablauf-Leases während langer Verarbeitung und verwenden claim-eigene Finalpfade; ein verlorener Claim kann die Ausgabe des Gewinners nicht entfernen. Fehlende oder beschädigte fertige Derivate werden sicher neu eingeplant. Aktive Originale werden periodisch und vor Auslieferung auf Existenz, Größe und SHA-256 geprüft; Fehler bleiben als Diagnosezustand sichtbar und werden ohne sichere Quelle niemals destruktiv erraten.
 
 Nur der Eigentümer verändert seine Alben und Medien; der Partner liest. Paarzuordnung begrenzt auf zwei aktive Mitglieder. Jede Medien-, Thumbnail- und Downloadanfrage prüft aktuelle Berechtigung. Geräteanmeldung und widerrufbare, serverseitig gehashte Tokens sind implementiert; vor Zugriff über das Netzwerk ist zusätzlich HTTPS einzurichten. Details stehen in [api.md](api.md). VPN versus öffentlich erreichbarer TLS-Reverse-Proxy bleibt offen.
 
-Originale sind unveränderlich. Entfernen eines lokalen Originals oder Abwählen eines Albums löscht keine Serverdatei. Abwählen beendet die Freigabe. Explizites Löschen in PhotoSync verschiebt ein Medium für 30 Tage in den Papierkorb; Partnerzugriff endet sofort. Wiederherstellung bis zur Frist stellt vorhandene Mitgliedschaften wieder her, aber keine widerrufenen Freigaben. Danach löscht ein wiederholbarer Job Original und Varianten; Tombstones bleiben für Sync erhalten.
+Originale sind unveränderlich. Nur ein nachweislich vollständiger MediaStore-Scan mit voller Berechtigung darf ein fehlendes lokales Original als Löschung interpretieren; eingeschränkter Zugriff, Queryfehler und fehlende Volumes dürfen das nie. Abwählen eines Albums beendet nur die Freigabe. Explizites Löschen in PhotoSync verschiebt ein Medium für 90 Tage in den Papierkorb; Partnerzugriff endet sofort. Wiederherstellung bis zur Frist stellt vorhandene Mitgliedschaften wieder her, aber keine widerrufenen Freigaben. Danach löscht ein geleaster, wiederholbarer Job Original und Varianten; nach Beginn dieses irreversiblen Zustands ist Restore gesperrt. Tombstones bleiben für Sync erhalten.
 
 Private Backups von Datenbank und Festplatte auf getrennte eigene Hardware planen und Wiederherstellung testen. Papierkorb ersetzt kein Backup. Abgelaufene Medien können in älteren Backups verbleiben; endgültige Backup-Retention vor Betrieb definieren.
 
@@ -72,3 +74,10 @@ Private Backups von Datenbank und Festplatte auf getrennte eigene Hardware plane
 - [Retrofit Releases](https://github.com/square/retrofit/releases).
 - [Room](https://developer.android.com/training/data-storage/room) und [Offline-first Android](https://developer.android.com/topic/architecture/data-layer/offline-first).
 - [MediaStore und Berechtigungen](https://developer.android.com/training/data-storage/shared/media).
+
+
+## Partnergalerie
+
+Der Partner-Tab fragt ausschliesslich einen schmalen Partneralbum-Endpunkt ab; die Serverberechtigung begrenzt ihn auf freigegebene Alben des anderen Accounts. Albumkarten enthalten nur Zaehler und ein optionales Cover. Ein geoeffnetes Album nutzt cursorbasiertes Paging (60 Metadaten, begrenzter Prefetch), keine Gesamtliste und keine vorsorglichen Originaldownloads.
+
+Im Android-cacheDir liegen getrennte, jederzeit loeschbare Partner-Cachebereiche: LRU-Dateien fuer Thumbnail/optimierte Bilder sowie der Media3-Range-Cache fuer optimierte Videos. Variantentyp, Derivatzeitpunkt und Hash gehoeren zum Schluessel. Bildcache-Finals werden vor Wiederverwendung per SHA-256 validiert; Download und Copy-Fallback schreiben nur `.part` und finalisieren atomar. Dieser fluechtige Cache ist nicht Room-verwaltet und technisch strikt vom erst in Schritt 10 geplanten Offline-Dateispeicher getrennt. Fotos laden beim Oeffnen nur die optimierte Variante und unterstuetzen Zoom; Videos spielen die optimierte MP4 per Range-Streaming ab.

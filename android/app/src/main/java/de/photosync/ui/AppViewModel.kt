@@ -93,7 +93,7 @@ class AppViewModel(private val repository: PhotoSyncRepository) : ViewModel() {
         fun factory(context: Context): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
-                val repository = PhotoSyncRepository(AppDatabase.get(context), SecureCredentialStore(context))
+                val repository = PhotoSyncRepository(context.applicationContext, AppDatabase.get(context), SecureCredentialStore(context))
                 return AppViewModel(repository) as T
             }
         }

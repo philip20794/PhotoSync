@@ -1,5 +1,7 @@
 package de.photosync.data
 
+import android.content.Context
+import androidx.room.withTransaction
 import de.photosync.data.local.AppDatabase
 import de.photosync.data.local.DeviceSessionEntity
 import de.photosync.data.local.SecureCredentialStore
@@ -13,8 +15,14 @@ import de.photosync.domain.model.ServerConfig
 import de.photosync.domain.model.SessionState
 import kotlinx.coroutines.flow.combine
 import retrofit2.HttpException
+import de.photosync.data.offline.PartnerOfflineRepository
+import de.photosync.data.offline.OfflineCleanupEntity
+import de.photosync.data.offline.OfflineCleanupKind
+import de.photosync.data.sync.remoteScope
+import de.photosync.ui.partner.PartnerMediaCache
 
 class PhotoSyncRepository(
+    private val context: Context,
     private val database: AppDatabase,
     private val credentials: SecureCredentialStore,
 ) {
@@ -37,8 +45,12 @@ class PhotoSyncRepository(
     }
 
     suspend fun saveServer(baseUrl: String) {
-        credentials.clear()
-        database.appStateDao().clearSession()
+        try {
+            prepareSessionRemoval()
+        } finally {
+            credentials.clear()
+            database.appStateDao().clearSession()
+        }
         database.appStateDao().saveServer(ServerConfigEntity(baseUrl = baseUrl))
     }
 
@@ -65,8 +77,32 @@ class PhotoSyncRepository(
     }
 
     suspend fun signOut() {
-        credentials.clear()
-        database.appStateDao().clearSession()
+        try {
+            prepareSessionRemoval()
+        } finally {
+            credentials.clear()
+            database.appStateDao().clearSession()
+            de.photosync.data.offline.OfflineLegacyCleanupWorker.enqueue(context)
+        }
+    }
+
+    /**
+     * Privacy policy: volatile partner cache is synchronously erased before logout.
+     * Durable offline files are first marked NONE in Room, remain bound to their
+     * old scope, and are then removed by idempotent scoped workers.
+     */
+    private suspend fun prepareSessionRemoval() {
+        val server = database.appStateDao().getServer() ?: return
+        val session = database.appStateDao().getSession() ?: return
+        val scope = remoteScope(server.baseUrl, session.userId)
+        val albums = database.offlineDao().allAlbums(scope)
+        database.withTransaction { database.offlineDao().requestScopeRemoval(scope) }
+        val offline = PartnerOfflineRepository(context, database, scope)
+        albums.forEach { offline.retry(it.albumId) }
+        val cacheCleanup = OfflineCleanupEntity("partner-cache-logout", OfflineCleanupKind.PARTNER_CACHE, scope)
+        database.offlineDao().saveCleanup(cacheCleanup)
+        PartnerMediaCache.get(context, credentials).clear()
+        database.offlineDao().deleteCleanup(cacheCleanup.id)
     }
 
     suspend fun clearInvalidSessionIfUnauthorized(error: Throwable) {

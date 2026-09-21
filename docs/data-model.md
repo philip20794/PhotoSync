@@ -1,6 +1,6 @@
 # Datenmodell
 
-Implementiert sind technische Baseline, Authentifizierung sowie Album- und Originaldateimodell. Migration `20260914000500_media_derivatives` ergänzt persistente Medienvarianten und setzt `service_metadata.schema_version` auf **5**. PostgreSQL enthält ausschließlich Metadaten; Originalbytes liegen unter dem konfigurierten Medienpfad.
+Implementiert sind technische Baseline, Authentifizierung, Album-/Originaldateien, der 90-Tage-Papierkorb und wiederaufnehmbare Transfers. Die aktuelle PostgreSQL-Schema-Version ist **11**; `20260923000100_original_integrity` ergänzt den persistenten Diagnosezustand aktiver Originale. PostgreSQL enthält ausschließlich Metadaten; Originalbytes liegen unter dem konfigurierten Medienpfad.
 
 UUIDs sind stabile Server-IDs. Zeitpunkte werden als `timestamptz(3)` in UTC gespeichert. Dateigrößen und Videodauer sind `bigint` und erscheinen in JSON als Dezimalstrings, damit Android und JavaScript keine Genauigkeit verlieren.
 
@@ -8,13 +8,13 @@ UUIDs sind stabile Server-IDs. Zeitpunkte werden als `timestamptz(3)` in UTC ges
 
 | Tabelle / Prisma-Modell | Wesentliche Felder und Regeln |
 | --- | --- |
-| `service_metadata` / ServiceMetadata | Technische Schema-Version; aktuell `5` |
+| `service_metadata` / ServiceMetadata | Technische Schema-Version; aktuell `11` |
 | `pairs` / Pair | Eine Instanzzeile, Setupstatus und gemeinsame Sperre für Auth-Mutationen |
 | `users` / User | Account mit Mitgliedsplatz 1 oder 2; höchstens zwei Accounts |
 | `devices` / Device | Eigenes Gerät und optionaler eindeutiger Credential-Hash; widerrufene Geräte haben keinen Hash |
 | `pairing_codes` / PairingCode | Gehashter, befristeter Einmalcode für Partner oder weiteres eigenes Gerät |
-| `albums` / Album | UUID, `ownerId`, `sourceDeviceId`, `clientAlbumId`, Titel, `sharedAt`, Erstellungs-/Änderungszeit |
-| `assets` / Asset | UUID, Besitzer und genau ein Album, Originalmetadaten, Quellgeräte-/Client-ID, erwartete und tatsächliche SHA-256, relativer Speicherpfad, Uploadstatus und Zeitpunkte |
+| albums / Album | UUID, ownerId, sourceDeviceId, clientAlbumId, Titel, sharedAt, backedUpAt, Erstellungs-/Änderungszeit |
+| `assets` / Asset | UUID, Besitzer und genau ein Album, Originalmetadaten, Quellgeräte-/Client-ID, erwartete und tatsächliche SHA-256, relativer Speicherpfad, Uploadstatus, Integritätsdiagnose und Zeitpunkte |
 | `asset_derivatives` / AssetDerivative | Pro Asset je eine Art `thumbnail` und `optimized`; persistenter Jobstatus, Ausgabemetadaten, Hash, Versuche, Fehler und nächste Ausführungszeit |
 
 Prisma verwaltet zusätzlich `_prisma_migrations`.
@@ -26,6 +26,8 @@ Ein Album gehört genau einem Nutzer. `ownerId` ist ein Pflicht-Fremdschlüssel 
 `clientAlbumId` ist die stabile Android-/MediaStore-Zuordnung innerhalb eines Geräts. `UNIQUE(sourceDeviceId, clientAlbumId)` verhindert Dubletten; Albumtitel sind bewusst nicht eindeutig. Die Server-UUID bleibt die API-Identität.
 
 `sharedAt` ist gesetzt, solange das Album für den anderen Account desselben `Pair` freigegeben ist. Ausschalten setzt es auf `NULL`, ohne Eigentümerdaten oder Originale zu löschen. Der Eigentümer darf das Album weiterhin lesen und erneut freigeben. Der Partner darf nur Alben mit `sharedAt`, darin ausschließlich fertige Assets und deren Originale lesen. Quellgerät und lokale Album-ID werden dem Partner nicht ausgegeben.
+
+`backedUpAt` ist davon unabhängig: Es markiert, dass das Album serverseitig als privates Auto-Backup erhalten bleiben soll. Ein privates Backup wird nie über Partnerabfragen oder den Partner-Change-Feed sichtbar. Wird ein solches Album später geteilt, setzt dieselbe Serverressource `sharedAt`; Assets und Originale werden nicht ein zweites Mal hochgeladen. Das Ausschalten von Auto-Backup entfernt weder `backedUpAt` noch vorhandene Originale.
 
 ## Assets und Originale
 
@@ -43,45 +45,50 @@ Gespeicherte Felder:
 - `durationMillis`: bei Videos erforderlich, bei Bildern nicht erlaubt.
 - `sourceDeviceId`, `clientAssetId`: optionale gekoppelte Quellidentität; Android setzt beide stabil pro MediaStore-Datensatz.
 - `expectedSha256`: vor dem Upload clientseitig gestreamt berechneter Hash zur Inhaltsprüfung und Deduplizierung im Album.
-- `sha256`: serverseitig über die tatsächlich empfangenen Originalbytes berechnet; nur bei `ready` gesetzt.
+- `sha256`: serverseitig über die tatsächlich empfangenen Originalbytes berechnet; bei `ready`, `deleted` und `purging` gesetzt, nach erfolgreichem Purge geleert.
+- `integrityStatus`, `integrityError`, `integrityCheckedAt`: persistenter `healthy`- oder `error`-Diagnosezustand für fehlende, falsch große oder SHA-abweichende aktive Originale.
 - `storagePath`: eindeutiger, servergenerierter relativer Pfad.
-- `status`: `pending`, `uploading`, `ready` oder `failed`.
+- `status`: `pending`, `uploading`, `ready`, `failed`, `deleted`, `purging` oder `purged`. `deleted` und `purging` behalten den Hash bis zur erfolgreichen Dateilöschung; `purged` ist der dauerhafte Tombstone.
+- `uploadSessionId`, `uploadOffset`, `uploadPartPath`, `uploadExpiresAt`: persistente, eindeutige Upload-Sitzung mit ausschließlich serverbestätigtem Offset. Diese Felder sind genau im Zustand `uploading` gesetzt.
+- `uploadLeaseId`, `uploadLeaseExpiresAt`: kurzlebiger exklusiver Claim für genau einen Chunk beziehungsweise die Finalisierung; die Sitzungs-TTL ist davon unabhängig und länger.
+- `cleanupLeaseId`, `cleanupLeaseExpiresAt`: exklusiver, zeitlich begrenzter Claim für den physischen Purge. Ein abgebrochener `purging`-Lauf bleibt irreversibel und wird erst nach Lease-Ablauf übernommen.
 - `createdAt`, `updatedAt`: Erstellungs- und Änderungszeit.
 
-SQL-CHECKs sichern positive Größen und Dimensionen, MIME-/Dauer-Konsistenz, gekoppelte Clientidentität, Hashformate, erlaubte Statuswerte sowie die Regel: Nur `ready` besitzt einen serverseitig berechneten SHA-256-Hash. Eindeutige Constraints auf `(sourceDeviceId, clientAssetId)` und `(albumId, expectedSha256)` verhindern doppelte Anlage nach verlorenen Antworten oder erneutem Scan. Der interne `storagePath` ist eindeutig und wird in API-Antworten nicht veröffentlicht.
+SQL-CHECKs sichern positive Größen und Dimensionen, MIME-/Dauer-Konsistenz, gekoppelte Clientidentität, Hashformate, erlaubte Statuswerte sowie die Regel: `ready`, `deleted` und `purging` besitzen einen serverseitig berechneten SHA-256-Hash. Eindeutige Constraints auf `(sourceDeviceId, clientAssetId)` und `(albumId, expectedSha256)` verhindern doppelte Anlage nach verlorenen Antworten oder erneutem Scan. Der interne `storagePath` ist eindeutig und wird in API-Antworten nicht veröffentlicht.
 
 ## Uploadzustände und Dateisystem
 
-Der Originalupload ist innerhalb eines Requests nicht fortsetzbar, kann über denselben idempotenten Metadatensatz aber erneut gestartet werden:
+Der Originalupload ist chunkweise und über App-/Serverneustarts fortsetzbar:
 
 ```text
 Metadaten anlegen → pending
-Stream beanspruchen → uploading
-vollständig + fsync + SHA-256 + atomare Umbenennung → ready
-Fehler/Abbruch → failed
+Sitzung anlegen → uploading(offset = 0)
+Chunk mit passendem Offset + fsync → uploading(offset += Bytes)
+vollständig + SHA-256 + atomare Umbenennung + DB-Commit → ready
+Hashfehler → failed; Transport-/Speicherfehler → uploading mit letztem bestätigten Offset
 ```
 
-Der Server schreibt den Request-Stream zunächst als zufällig benannte Datei unter:
+Der Server schreibt alle Chunks einer Sitzung in:
 
 ```text
-uploads/<assetId>-<random>.part
+uploads/<assetId>-<uploadSessionId>.part
 ```
 
-Währenddessen zählt er Bytes und berechnet SHA-256. Die empfangene Länge muss sowohl `Content-Length` als auch der vorher deklarierten `fileSize` entsprechen und unter `MAX_UPLOAD_BYTES` liegen. Nach vollständigem Schreiben wird die Temporärdatei synchronisiert und auf demselben Dateisystem atomar nach folgendem servergenerierten Ziel umbenannt:
+Jeder Request muss am persistierten Offset beginnen, eine exakte `Content-Length` besitzen und unter `MAX_UPLOAD_CHUNK_BYTES` liegen. Erst nach dem letzten Chunk prüft der Server Gesamtgröße und SHA-256 der vollständigen Datei. Danach wird sie auf demselben Dateisystem atomar nach folgendem servergenerierten Ziel umbenannt:
 
 ```text
 originals/<ownerId>/<assetId>/original
 ```
 
-Erst danach setzt eine bedingte Datenbankänderung Status und Hash auf `ready`. Downloads suchen nur `ready`-Zeilen und prüfen zusätzlich, dass die Datei existiert und ihre Größe stimmt. Der berechnete Serverhash muss zusätzlich `expectedSha256` entsprechen. Bei Fehlern werden temporäre beziehungsweise bereits umbenannte Dateien bestmöglich entfernt und das Asset auf `failed` gesetzt. Derselbe Metadaten-POST setzt ein passendes fehlgeschlagenes Asset wieder auf `pending`; ein bereits fertiges Asset bleibt `ready`. Ein Prozessabsturz kann eine `uploading`-Zeile oder verwaiste Datei hinterlassen, aber keine teilweise Datei als `ready` markieren. Ein Reparaturjob für solche Crash-Reste folgt später.
+Erst danach setzt eine durch Sitzung und Lease bedingte Datenbanktransaktion Status und Hash auf `ready` und legt die Derivatjobs an. Ein abgebrochener Chunk wird auf den letzten DB-bestätigten Offset zurückgekürzt. Stale-Lease-Recovery gleicht DB-Offset und `.part`-Länge ab; ein bereits umbenanntes vollständiges Original wird nach Größen- und Hashprüfung fertig committed. Abgelaufene Sitzungen und nicht referenzierte Upload-Parts werden idempotent entfernt. Ein periodischer Integritätsjob und jeder Originaldownload prüfen aktive Originale auf Dateiart, Größe und SHA-256. Fehlerhafte Originale werden nicht mit falschem ETag ausgeliefert, aus Partnerlisten ausgeblendet und in `/health` als `degraded` gemeldet; ohne sichere Quelle erfolgt keine destruktive Reparatur. Ein Hashfehler verwirft die Sitzung als `failed`; bereits bestätigte Bytes werden bei Netzwerk- oder Speicherfehlern nicht neu übertragen.
 
-Der relative Pfad wird gegen den aktiven `MEDIA_DEV_ROOT` oder `MEDIA_PROD_ROOT` aufgelöst. Absolute Pfade und `..`-Ausbrüche werden abgelehnt. DB und Originaldateien müssen zusammen gesichert werden; ein Datenbankbackup enthält keine Mediendaten.
+Der relative Pfad wird gegen den aktiven `MEDIA_DEV_ROOT` oder `MEDIA_PROD_ROOT` aufgelöst. Absolute Pfade und `..`-Ausbrüche werden abgelehnt. DB und Originaldateien müssen zusammen gesichert werden; ein Datenbankbackup enthält keine Mediendaten. Ein optionaler, außerhalb des Medienroots liegender `CATALOG_ROOT` wird aus diesen Metadaten als lokale Symlink-Projektion aufgebaut. Er enthält keine zusätzlichen Medienbytes und ist niemals API- oder Partnerdatenquelle; fehlende, unvollständige, bereits purgte oder als fehlerhaft markierte Originale werden darin nicht verlinkt.
 
 ## Derivate und Jobzustände
 
-`UNIQUE(assetId, kind)` garantiert genau höchstens eine Zeile pro Variante; nach einem fertigen Upload werden beide Zeilen idempotent angelegt. `kind` ist `thumbnail` oder `optimized`, `status` ist `pending`, `processing`, `ready` oder `failed`. `attempts`, `lastError` und `nextAttemptAt` erlauben automatische sowie explizite Wiederholung. Nur `ready` darf MIME-Type, relativen Speicherpfad, Dateigröße, Dimensionen, optionale Videodauer und SHA-256 besitzen; SQL-CHECKs erzwingen vollständige Ausgabemetadaten. Nicht fertige Zeilen müssen diese Felder leer lassen. Der Fremdschlüssel auf `assets` löscht Jobmetadaten später zusammen mit dem Asset.
+`UNIQUE(assetId, kind)` garantiert genau höchstens eine Zeile pro Variante; nach einem fertigen Upload werden beide Zeilen idempotent angelegt. `kind` ist `thumbnail` oder `optimized`, `status` ist `pending`, `processing`, `ready` oder `failed`. `processingLeaseId` und `processingLeaseExpiresAt` sind im Zustand `processing` verpflichtend; nur abgelaufene Claims werden übernommen. `attempts`, `lastError` und `nextAttemptAt` erlauben automatische sowie explizite Wiederholung. Nur `ready` darf MIME-Type, relativen Speicherpfad, Dateigröße, Dimensionen, optionale Videodauer und SHA-256 besitzen; SQL-CHECKs erzwingen vollständige Ausgabemetadaten. Nicht fertige Zeilen müssen diese Felder leer lassen.
 
-Dateien liegen unter `derivatives/<ownerId>/<assetId>/<kind>.<ext>`. Auch hier entsteht die endgültige Datei nur durch `fsync` und atomare Umbenennung einer benachbarten `.part`-Datei. Der Originalpfad ist niemals ein Ausgabeziel. Beim Start werden unterbrochene `processing`-Jobs wieder `pending`; fertige Alt-Assets ohne Jobzeilen werden nachgetragen. Das Profil beschreibt [media-derivatives.md](media-derivatives.md).
+Dateien liegen unter `derivatives/<ownerId>/<assetId>/<kind>-<claimId>.<ext>`. Jeder Claim besitzt temporären und finalen Pfad exklusiv. Die Lease wird während langer Sharp-/FFmpeg-Arbeit erneuert; nur der weiterhin aktuelle Claim darf seine Ausgabe als `ready` referenzieren. Ein Verlierer entfernt ausschließlich seinen eigenen Pfad. Die Übernahme nutzt Datei-`fsync`, atomaren Rename und Verzeichnis-`fsync`. Eine begrenzte Reconciliation prüft fertige Varianten auf Existenz, Größe und SHA-256; eindeutig ungültige Dateien werden auf `pending` zurückgesetzt; gealterte, von keinem aktuellen Claim referenzierte Final- und Part-Dateien werden entfernt. Temporäre Infrastrukturfehler behalten auch nach dem normalen Versuchslimit automatischen, auf 24 Stunden begrenzten Backoff. Beim endgültigen Purge werden Dateien und nicht mehr gültige Derivatzeilen entfernt, während die Asset-Zeile als Tombstone bestehen bleibt.
 
 ## Authentifizierung
 
@@ -91,12 +98,18 @@ Alle Album-/Asset-Routen benötigen ein aktives Gerätetoken. Abfragen werden au
 
 ## Android-Room-Modell
 
-Room-Schema 2 ergänzt `shared_albums` und `upload_queue`. Freigabewunsch, Server-Album-ID, letzter Scan, Content-URI, stabile Client-Asset-ID, SHA-256, Server-Asset-ID, Status, Versuche und übertragene Bytes überleben App- und Prozessneustarts. `hashing` und `uploading` werden beim nächsten Worker-Lauf auf `retry` zurückgesetzt. Fertige Queuezeilen bleiben als Deduplizierungsnachweis erhalten. Zeilen sind an die Geräte-ID gebunden, damit ein später angemeldeter anderer Account keine alte Queue übernimmt.
+Room-Schema 8 ergänzt die persistente `uploadSessionId` in `upload_queue`; der serverbestätigte Offset liegt in `uploadedBytes`. `shared_albums` unterscheidet intern shareRequested und backupRequested, ohne einen dritten sichtbaren Albumzustand. Queue-, Cursor-, Offline- und Cleanup-Zustände überleben App- und Prozessneustarts. `REMOTE_DELETED` bewahrt ohne Mediendatei den kleinen Variantenwunsch eines gelöschten Partnerassets, insbesondere einzelne ORIGINAL-Overrides. Ein unveränderter belastbarer MediaStore-Befund bewahrt den fertigen Zustand; nur ein erfolgreicher vollständiger Scan mit voller Berechtigung darf lokale Abwesenheit als Löschung werten. Geänderte Bytes bewahren in `REPLACEMENT_PENDING` und `REPLACEMENT_DELETE_PENDING` die alte Server-ID bis zum bestätigten Papierkorbauftrag; erst danach beginnt der neue Upload. Offene, lokal verschwundene Uploads wechseln nach vollständigem Scan über `CANCEL_PENDING` zu `ABANDONED`; spätere Wiederentdeckung erzeugt wieder eine normale Queuezeile. Auch Legacy-Zeilen ohne reale MediaStore-ID verwenden dieses Replacement-Protokoll. Einstellungen, Remote-Metadaten und alle Partner-Offline-Zeilen sind nach Server-URL und Nutzer getrennt.
 
 ## Noch nicht implementiert
 
-- Serverseitiges Change-Log, Tombstones und Partnergalerie.
 - Ein Asset in mehreren Alben; aktuell gehört es absichtlich genau einem Album.
 - Einzelne Empfänger; im Zwei-Personen-Betrieb ist `sharedAt` die Freigabe für den Partner.
-- Byteweise wiederaufnehmbare/chunkbasierte Uploads; Wiederholung beginnt derzeit das einzelne Original erneut.
-- 30-Tage-Papierkorb, Purge- und Reparaturjobs.
+
+
+## Android Room: Partner-Offline-Zustand
+
+`offline_albums` und `offline_assets` verwenden seit Schema 6 zusammengesetzte Schlüssel aus Server-/Account-Scope und Album-/Asset-ID. Das Album speichert Wunschmodus, Größenprognosen, monotone Generation, Arbeits-/Fehlerstatus und persistenten Metadaten-Seitencursor. Das Asset speichert Albumstandard oder Override, lokale Variante, Version, Hash, Pfad, Fortschritt, Fehler und zuletzt gesehene Generation. `offline_cleanup` hält fehlgeschlagene Datenschutz- und Legacy-Bereinigungen retryfähig. Altzeilen erhalten einen unbenutzbaren Legacy-Scope statt einer Zuordnung zur nächsten Session.
+
+## Server-Sync-Journal
+
+Schema 7 ergänzt eine transaktional gesperrte `sync_head`-Zeile, unveränderliche `sync_changes` und dauerhafte `sync_push_devices`. Nur fachlich partner-sichtbare Projektionen werden aufgezeichnet; Lease, Heartbeat, Recovery und interne nicht sichtbare Derivatstatus erzeugen keine Revision. `createdAt` und `minRevision` tragen die Epoch-basierte Retention. Fehlgeschlagene DB-Transaktionen hinterlassen keine Revision. Push-Zustände sind nur Auslieferungshinweise und werden niemals als Client-Cursor ausgewertet.

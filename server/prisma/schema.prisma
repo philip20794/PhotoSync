@@ -53,6 +53,7 @@ model Device {
   user          User      @relation(fields: [userId], references: [id], onDelete: Restrict)
   pairingCodes  PairingCode[]
   sourceAlbums  Album[]
+  syncPush      SyncPushDevice?
 
   @@unique([id, userId])
   @@index([userId])
@@ -79,6 +80,39 @@ model PairingCode {
   @@map("pairing_codes")
 }
 
+// Trigger-maintained journal. No media foreign keys: deletion invalidations survive.
+model SyncHead {
+  id       Int    @id
+  epoch    String @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  revision BigInt @default(0)
+  minRevision BigInt @default(0)
+  @@map("sync_head")
+}
+
+model SyncChange {
+  revision BigInt @id
+  pairId String @db.Uuid
+  ownerId String @db.Uuid
+  albumId String @db.Uuid
+  assetId String? @db.Uuid
+  kind String
+  operation String
+  shared Boolean
+  createdAt DateTime @default(now()) @db.Timestamptz
+  @@index([pairId, revision], map: "sync_changes_pair_revision")
+  @@map("sync_changes")
+}
+
+model SyncPushDevice {
+  deviceId String @id @db.Uuid
+  token String @unique
+  revision BigInt @default(0)
+  nextAttemptAt DateTime @default(now()) @db.Timestamptz
+  attempts Int @default(0)
+  device Device @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+  @@map("sync_push_devices")
+}
+
 model Album {
   id             String   @id @default(uuid()) @db.Uuid
   ownerId        String   @db.Uuid
@@ -86,6 +120,7 @@ model Album {
   clientAlbumId  String   @db.VarChar(255)
   title          String   @db.VarChar(200)
   sharedAt       DateTime? @db.Timestamptz(3)
+  backedUpAt     DateTime? @db.Timestamptz(3)
   createdAt      DateTime @default(now()) @db.Timestamptz(3)
   updatedAt      DateTime @updatedAt @db.Timestamptz(3)
   owner          User     @relation(fields: [ownerId], references: [id], onDelete: Restrict)
@@ -113,8 +148,26 @@ model Asset {
   clientAssetId    String?   @db.VarChar(255)
   expectedSha256   String?   @db.Char(64)
   sha256           String?   @db.Char(64)
+  integrityStatus  String    @default("healthy") @db.VarChar(16)
+  integrityError   String?   @db.VarChar(500)
+  integrityCheckedAt DateTime? @db.Timestamptz(3)
   storagePath      String    @unique @db.VarChar(512)
   status           String    @default("pending") @db.VarChar(16)
+  uploadStartedAt  DateTime? @db.Timestamptz(3)
+  uploadLeaseId    String?   @db.Uuid
+  uploadLeaseExpiresAt DateTime? @db.Timestamptz(3)
+  uploadSessionId  String?   @unique @db.Uuid
+  uploadOffset     BigInt    @default(0)
+  uploadPartPath   String?   @unique @db.VarChar(512)
+  uploadExpiresAt  DateTime? @db.Timestamptz(3)
+  deletedAt        DateTime? @db.Timestamptz(3)
+  purgeAfter       DateTime? @db.Timestamptz(3)
+  cleanupRequestedAt DateTime? @db.Timestamptz(3)
+  cleanupAttempts  Int       @default(0)
+  cleanupLastError String?   @db.VarChar(500)
+  cleanupLeaseId   String?   @db.Uuid
+  cleanupLeaseExpiresAt DateTime? @db.Timestamptz(3)
+  purgedAt         DateTime? @db.Timestamptz(3)
   createdAt        DateTime  @default(now()) @db.Timestamptz(3)
   updatedAt        DateTime  @updatedAt @db.Timestamptz(3)
   owner            User      @relation(fields: [ownerId], references: [id], onDelete: Restrict)
@@ -125,6 +178,9 @@ model Asset {
   @@unique([albumId, expectedSha256])
   @@index([ownerId])
   @@index([albumId, createdAt])
+  @@index([status, uploadLeaseExpiresAt], map: "assets_upload_recovery_idx")
+  @@index([status, purgeAfter], map: "assets_trash_purge_idx")
+  @@index([status, cleanupLeaseExpiresAt], map: "assets_trash_recovery_idx")
   @@map("assets")
 }
 
@@ -144,11 +200,14 @@ model AssetDerivative {
   attempts       Int      @default(0)
   lastError      String?  @db.VarChar(500)
   nextAttemptAt  DateTime @default(now()) @db.Timestamptz(3)
+  processingLeaseId String? @db.Uuid
+  processingLeaseExpiresAt DateTime? @db.Timestamptz(3)
   createdAt      DateTime @default(now()) @db.Timestamptz(3)
   updatedAt      DateTime @updatedAt @db.Timestamptz(3)
   asset          Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
 
   @@unique([assetId, kind])
   @@index([status, nextAttemptAt])
+  @@index([status, processingLeaseExpiresAt], map: "asset_derivatives_recovery_idx")
   @@map("asset_derivatives")
 }

@@ -113,7 +113,25 @@ export function createAuthService(client: PrismaClient, config: Config) {
     async me(principal: Principal) {
       const device = await client.device.findFirst({ where: { id: principal.deviceId, revokedAt: null }, include: { user: true } });
       if (!device) throw unauthorized();
-      return { user: userView(device.user), device: deviceView(device) };
+      const partner = await client.user.findFirst({
+        where: { pairId: principal.pairId, id: { not: principal.userId } },
+        select: { id: true, displayName: true },
+      });
+      return { user: userView(device.user), device: deviceView(device), partner: partner ? userView(partner) : null };
+    },
+    async updateProfile(principal: Principal, body: { displayName: string; deviceName: string }) {
+      return client.$transaction(async (tx) => {
+        await requireActive(tx, principal);
+        const [user, device] = await Promise.all([
+          tx.user.update({ where: { id: principal.userId }, data: { displayName: body.displayName } }),
+          tx.device.update({ where: { id: principal.deviceId }, data: { name: body.deviceName } }),
+        ]);
+        const partner = await tx.user.findFirst({
+          where: { pairId: principal.pairId, id: { not: principal.userId } },
+          select: { id: true, displayName: true },
+        });
+        return { user: userView(user), device: deviceView(device), partner: partner ? userView(partner) : null };
+      });
     },
     async devices(principal: Principal) {
       const devices = await client.device.findMany({ where: { userId: principal.userId }, orderBy: { createdAt: 'asc' } });

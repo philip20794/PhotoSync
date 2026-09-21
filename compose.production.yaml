@@ -1,16 +1,54 @@
-# Use with: docker compose --env-file .env.production -f compose.yaml -f compose.production.yaml ...
-# Separate project name also separates the PostgreSQL volume and network.
+# Production only; see docs/deployment.md before starting it.
+# The bind mounts deliberately require pre-existing directories on the dedicated
+# disk. If the disk is not mounted, Docker must fail instead of creating data
+# below the mountpoint on the root SSD.
 name: photosync-prod
 services:
+  db:
+    volumes: !override
+      - type: bind
+        source: ${PHOTOSYNC_PROD_POSTGRES_PATH:?PHOTOSYNC_PROD_POSTGRES_PATH setzen}
+        target: /var/lib/postgresql/data
+        bind:
+          create_host_path: false
+    ports: !reset []
+    logging: &rotated-logs
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
   server:
     environment:
       NODE_ENV: production
+      CATALOG_ROOT: /catalog/production
+    ports: !reset []
     volumes: !override
       - type: bind
         source: ${PHOTOSYNC_PROD_MEDIA_PATH:?PHOTOSYNC_PROD_MEDIA_PATH setzen}
         target: /media/production
         bind:
           create_host_path: false
+      - type: bind
+        source: ${PHOTOSYNC_PROD_CATALOG_PATH:?PHOTOSYNC_PROD_CATALOG_PATH setzen}
+        target: /catalog/production
+        bind:
+          create_host_path: false
+    logging: *rotated-logs
+    networks:
+      default: {}
+      proxy:
+        aliases:
+          - photosync-api
+
   migrate:
     environment:
       NODE_ENV: production
+    logging: *rotated-logs
+
+networks:
+  # A dedicated, external network shared only with Nginx Proxy Manager. The
+  # API has no host port; the proxy reaches it by the photosync-api alias.
+  proxy:
+    external: true
+    name: ${PHOTOSYNC_PROXY_NETWORK:?PHOTOSYNC_PROXY_NETWORK setzen}

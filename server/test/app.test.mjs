@@ -11,7 +11,7 @@ async function fixture(t, check = async () => {}) {
   const root = await mkdtemp(join(tmpdir(), 'photosync-unit-'));
   const config = loadConfig({
     NODE_ENV: 'test', LOG_LEVEL: 'silent', DATABASE_URL: 'postgresql://user:secret@localhost:5432/test',
-    MEDIA_DEV_ROOT: root, MEDIA_PROD_ROOT: '/unused-production',
+    MEDIA_DEV_ROOT: root, MEDIA_PROD_ROOT: '/unused-production', DERIVATIVE_WORKER_ENABLED: 'false',
   });
   let closed = false;
   let output = '';
@@ -25,10 +25,23 @@ test('health is ready with dependencies, adds request ID and forbids caching', a
   const { app } = await fixture(t);
   const response = await app.inject({ url: '/health', headers: { 'x-request-id': 'untrusted' } });
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(response.json(), { status: 'ok', checks: { database: 'ok', media: 'ok' } });
+  assert.deepEqual(response.json(), {
+    status: 'ok',
+    checks: { database: 'ok', media: 'ok', derivatives: 'disabled', originals: 'disabled' },
+    derivatives: { status: 'disabled', worker: 'disabled' },
+    originals: { status: 'disabled', errors: 0, checkedInCycle: 0, lastCycleAt: null },
+  });
   assert.equal(response.headers['cache-control'], 'no-store');
   assert.match(response.headers['x-request-id'], /^[0-9a-f-]{36}$/);
   assert.notEqual(response.headers['x-request-id'], 'untrusted');
+});
+
+test('liveness stays independent from readiness dependencies', async (t) => {
+  const { app, root } = await fixture(t, async () => { throw new Error('database down'); });
+  await rm(root, { recursive: true });
+  const response = await app.inject('/health/live');
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { status: 'ok' });
 });
 
 test('health reports database failure without exposing underlying secrets', async (t) => {

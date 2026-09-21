@@ -11,6 +11,7 @@ declare module 'fastify' {
 const name = z.string().trim().min(1).max(80);
 const setupBody = z.object({ displayName: name, deviceName: name }).strict();
 const pairBody = z.object({ code: z.string().min(1).max(39), deviceName: name, displayName: name.optional() }).strict();
+const profileBody = z.object({ displayName: name, deviceName: name }).strict();
 const codeBody = z.object({ purpose: z.enum(['partner', 'device']) }).strict();
 const idParams = z.object({ id: z.uuid() }).strict();
 
@@ -48,6 +49,8 @@ export function registerAuthRoutes(app: FastifyInstance, config: Config, auth: A
     return reply.code(204).send();
   });
   app.get('/v1/me', async (request) => service().me(request.principal!));
+  app.patch('/v1/me', { bodyLimit: 4096 }, async (request) =>
+    service().updateProfile(request.principal!, parse(profileBody, request.body)));
   app.get('/v1/devices', async (request) => service().devices(request.principal!));
   app.delete('/v1/devices/:id', async (request, reply) => {
     const { id } = parse(idParams, request.params);

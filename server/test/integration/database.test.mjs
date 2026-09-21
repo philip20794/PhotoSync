@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { mkdir } from 'node:fs/promises';
 import test from 'node:test';
 import { loadConfig } from '../../dist/config.js';
 import { createDatabase } from '../../dist/database.js';
@@ -12,12 +13,13 @@ if (process.env.PHOTOSYNC_INTEGRATION_TEST !== '1' ||
 
 test('real PostgreSQL: applied migration, ready health, missing baseline and recovery', async (t) => {
   const config = loadConfig();
+  await mkdir(config.mediaRoot, { recursive: true });
   const database = createDatabase(config);
   const app = buildApp(config, database);
   t.after(async () => { await app.close(); });
   const migrations = await database.client.$queryRaw`
     SELECT migration_name FROM "_prisma_migrations" WHERE finished_at IS NOT NULL AND rolled_back_at IS NULL`;
-  assert.ok(migrations.some((row) => row.migration_name === '20260914000500_media_derivatives'));
+  assert.ok(migrations.some((row) => row.migration_name === '20260915000100_upload_leases'));
   assert.equal((await app.inject('/health')).statusCode, 200);
   await database.client.serviceMetadata.delete({ where: { key: 'schema_version' } });
   try {
@@ -25,7 +27,7 @@ test('real PostgreSQL: applied migration, ready health, missing baseline and rec
     assert.equal(response.statusCode, 503);
     assert.equal(response.json().checks.database, 'error');
   } finally {
-    await database.client.serviceMetadata.create({ data: { key: 'schema_version', value: '5' } });
+    await database.client.serviceMetadata.create({ data: { key: 'schema_version', value: '11' } });
   }
   assert.equal((await app.inject('/health')).statusCode, 200);
 });

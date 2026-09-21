@@ -71,6 +71,9 @@ class InterruptedUploadTest {
                 ),
             ))
             server.enqueue(MockResponse().setResponseCode(201).setHeader("Content-Type", "application/json").setBody(assetJson("pending", null)))
+            val fileSize = requireNotNull(database.syncDao().getUpload("test-client-asset")).fileSize
+            server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json")
+                .setBody(sessionJson(0, fileSize, false)))
             server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_DURING_REQUEST_BODY))
 
             val api = RetrofitFactory.create(server.url("/").toString())
@@ -86,11 +89,13 @@ class InterruptedUploadTest {
             assertEquals(UploadStatus.RETRY, interrupted.status)
             assertNotNull(interrupted.sha256)
             assertEquals(SERVER_ASSET_ID, interrupted.serverAssetId)
+            assertEquals(UPLOAD_SESSION_ID, interrupted.uploadSessionId)
+            assertEquals(0, interrupted.uploadedBytes)
 
             database.close()
             database = AppDatabase.build(context, databaseName)
             assertEquals(UploadStatus.RETRY, requireNotNull(database.syncDao().getUpload("test-client-asset")).status)
-            assertEquals(2, server.requestCount)
+            assertEquals(3, server.requestCount)
         } finally {
             database.close()
             server.shutdown()
@@ -123,7 +128,11 @@ class InterruptedUploadTest {
             database.syncDao().enableAlbum(album)
             server.enqueue(MockResponse().setResponseCode(201).setHeader("Content-Type", "application/json").setBody(albumJson()))
             server.enqueue(MockResponse().setResponseCode(201).setHeader("Content-Type", "application/json").setBody(assetJson("pending", null)))
-            server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json").setBody(assetJson("ready", expectedHash)))
+            server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json")
+                .setBody(sessionJson(0, originalBytes.size.toLong(), false)))
+            server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json")
+                .setBody(sessionJson(originalBytes.size.toLong(), originalBytes.size.toLong(), true,
+                    assetJson("ready", expectedHash))))
             val session = DeviceSessionEntity(userId = "user-1", userDisplayName = "Alice", deviceId = "device-1", deviceName = "Pixel")
             val api = RetrofitFactory.create(server.url("/").toString())
 
@@ -132,11 +141,13 @@ class InterruptedUploadTest {
             val progress = database.syncDao().observeProgress("device-1").first().single()
             assertEquals(1, progress.totalCount)
             assertEquals(1, progress.completedCount)
-            assertEquals(3, server.requestCount)
+            assertEquals(4, server.requestCount)
             assertEquals("/v1/albums", server.takeRequest().path)
             assertEquals("/v1/albums/$SERVER_ALBUM_ID/assets", server.takeRequest().path)
+            assertEquals("/v1/assets/$SERVER_ASSET_ID/upload-session", server.takeRequest().path)
             val uploadRequest = server.takeRequest()
-            assertEquals("/v1/assets/$SERVER_ASSET_ID/original", uploadRequest.path)
+            assertEquals("/v1/upload-sessions/$UPLOAD_SESSION_ID", uploadRequest.path)
+            assertEquals("0", uploadRequest.getHeader("Upload-Offset"))
             assertEquals(originalBytes.toList(), uploadRequest.body.readByteArray().toList())
 
             database.close()
@@ -144,7 +155,7 @@ class InterruptedUploadTest {
             val second = SyncEngine(context, database, api, session, maxUploads = 1).run()
             assertEquals(false, second.retry)
             assertEquals(false, second.moreWork)
-            assertEquals(3, server.requestCount)
+            assertEquals(4, server.requestCount)
         } finally {
             database.close()
             server.shutdown()
@@ -199,8 +210,16 @@ class InterruptedUploadTest {
         }
     """.trimIndent()
 
+    private fun sessionJson(offset: Long, size: Long, completed: Boolean, asset: String? = null) = """
+        {
+          "id":"$UPLOAD_SESSION_ID","assetId":"$SERVER_ASSET_ID","offset":"$offset","size":"$size",
+          "expiresAt":"2026-09-21T00:00:00.000Z","completed":$completed,"asset":${asset ?: "null"}
+        }
+    """.trimIndent()
+
     private companion object {
         const val SERVER_ALBUM_ID = "00000000-0000-0000-0000-000000000010"
         const val SERVER_ASSET_ID = "00000000-0000-0000-0000-000000000020"
+        const val UPLOAD_SESSION_ID = "00000000-0000-0000-0000-000000000030"
     }
 }

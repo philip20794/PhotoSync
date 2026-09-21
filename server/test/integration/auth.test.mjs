@@ -68,6 +68,27 @@ test('setup is operator-authorized, single-use and stores only device hashes', a
   assert.ok(!logs().includes(alice.accessToken));
 });
 
+test('authenticated profile changes update account and device and expose partner status', async (t) => {
+  const { app, setup, invite, redeem } = await fixture(t);
+  const alice = await setup();
+  const invitation = await invite(alice.accessToken, 'partner');
+  const bob = (await redeem(invitation.code, { displayName: 'Bob' })).json();
+  const update = await app.inject({
+    method: 'PATCH',
+    url: '/v1/me',
+    headers: bearer(alice.accessToken),
+    payload: { displayName: 'Alice neu', deviceName: 'Neues Gerät' },
+  });
+  assert.equal(update.statusCode, 200, update.body);
+  assert.equal(update.json().user.displayName, 'Alice neu');
+  assert.equal(update.json().device.name, 'Neues Gerät');
+  assert.equal(update.json().partner.displayName, 'Bob');
+  const me = await app.inject({ url: '/v1/me', headers: bearer(alice.accessToken) });
+  assert.equal(me.json().user.displayName, 'Alice neu');
+  assert.equal(me.json().device.name, 'Neues Gerät');
+  assert.equal((await app.inject({ url: '/v1/me', headers: bearer(bob.accessToken) })).json().partner.displayName, 'Alice neu');
+});
+
 test('setup is disabled when no setup hash is configured', async (t) => {
   const { app, setupToken, client } = await fixture(t, { SETUP_TOKEN_HASH: '' });
   assert.equal((await app.inject({ method: 'POST', url: '/v1/auth/setup', headers: bearer(setupToken),

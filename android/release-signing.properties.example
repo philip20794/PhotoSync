@@ -1,0 +1,6 @@
+# Copy outside the repository to ~/.keys/photosync/release-signing.properties.
+# This file is deliberately incomplete and contains no secret.
+storeFile=/home/philip/.keys/photosync/photosync-release.jks
+storePassword=
+keyAlias=photosync
+keyPassword=

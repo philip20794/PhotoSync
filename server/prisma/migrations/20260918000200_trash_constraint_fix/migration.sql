@@ -1,0 +1,1 @@
+ALTER TABLE assets DROP CONSTRAINT IF EXISTS assets_check1;

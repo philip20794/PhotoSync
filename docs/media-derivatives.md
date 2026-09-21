@@ -1,6 +1,6 @@
 # Medien-Derivate
 
-Stand: 14.09.2026. Nach einem vollständig bestätigten Original legt das Backend zwei persistente Jobs in PostgreSQL an. Der HTTP-Upload wartet nicht auf Bild- oder Videokonvertierung. Ein Worker im Backend-Prozess beansprucht Jobs einzeln und schreibt ausschließlich unter `derivatives/`; `originals/` wird nur gelesen.
+Stand: 15.09.2026. Nach einem vollständig bestätigten Original legt das Backend zwei persistente Jobs in PostgreSQL an. Der HTTP-Upload wartet nicht auf Bild- oder Videokonvertierung. Ein Worker im Backend-Prozess beansprucht Jobs einzeln und schreibt ausschließlich unter `derivatives/`; `originals/` wird nur gelesen.
 
 ## Gewähltes Profil
 
@@ -24,11 +24,11 @@ pending → processing → ready
                   └→ failed → processing …
 ```
 
-Bei Fehlern steigt `attempts`; `lastError` und `nextAttemptAt` werden gespeichert. Automatische Versuche folgen nach 30 Sekunden, 60 Sekunden, 2 Minuten und 4 Minuten; bei höheren Versuchslimits steigt der Abstand bis höchstens eine Stunde, begrenzt durch `DERIVATIVE_MAX_ATTEMPTS`. Der Eigentümer kann fehlgeschlagene Varianten über `POST /v1/assets/{id}/derivatives/retry` sofort wieder freigeben. Beim Serverstart werden durch einen Prozessabbruch verbliebene `processing`-Zeilen auf `pending` gesetzt. Fertige Alt-Assets ohne Jobs werden schrittweise ergänzt.
+Bei Fehlern steigt `attempts`; `lastError` und `nextAttemptAt` werden gespeichert. Automatische Versuche folgen exponentiellem Backoff. Permanente Medien- oder Codecfehler enden bei `DERIVATIVE_MAX_ATTEMPTS`; temporäre Infrastrukturfehler wie ENOSPC, Quota-, I/O-, Timeout- oder DB-Ausfälle bleiben darüber hinaus mit einem Abstand bis höchstens 24 Stunden automatisch retryfähig. Der Eigentümer kann fehlgeschlagene Varianten über `POST /v1/assets/{id}/derivatives/retry` sofort wieder freigeben. Beim Serverstart werden durch einen Prozessabbruch verbliebene `processing`-Zeilen auf `pending` gesetzt. Fertige Alt-Assets ohne Jobs werden schrittweise ergänzt.
 
-Jeder Versuch schreibt eine zufällige `.part`-Datei neben das endgültige Derivat. Nach erfolgreicher Dekodierung/Kodierung, positiver Größe, SHA-256-Berechnung und `fsync` folgt eine atomare Umbenennung. Erst danach wechselt die Datenbankzeile auf `ready`. Fehler löschen die temporäre Datei bestmöglich. Ein abgestürzter Versuch kann ein vollständiges, noch nicht referenziertes Derivat hinterlassen; der nächste Versuch überschreibt es atomar. Das Original wird nie als Ausgabeziel geöffnet.
+Jeder Lease-Claim schreibt eine eigene `<kind>-<claimId>.<ext>.part` und übernimmt sie nach Größen- und SHA-Prüfung, Datei-`fsync`, atomarem Rename und Verzeichnis-`fsync` auf den ebenfalls claim-eigenen Finalpfad. Ein Heartbeat verlängert die Lease während Sharp/FFmpeg. Vor dem DB-Commit wird der Claim erneut geprüft. Ein Worker mit verlorenem Claim löscht nur seine eigene Ausgabe und kann deshalb nie die bereits committete Datei eines parallelen Gewinners entfernen. Die Reconciliation entfernt gealterte, nicht referenzierte Claim-Ausgaben nach dem Crashfenster. Das Original wird nie als Ausgabeziel geöffnet.
 
-Der aktuelle Worker verarbeitet Jobs sequenziell im einzelnen Backend-Prozess. CPU-/RAM-Limits, separate Worker-Prozesse und Hardware-Encoding werden erst nötig, wenn die private Zwei-Personen-Last das verlangt. `DERIVATIVE_TOOL_TIMEOUT_MS` begrenzt FFmpeg- und ffprobe-Unterprozesse. Sharp verarbeitet Bildjobs direkt und sequenziell im Backend-Prozess; ein sauberer Prozessstopp wartet auf den aktiven Job.
+Der aktuelle Worker verarbeitet Jobs sequenziell im einzelnen Backend-Prozess. CPU-/RAM-Limits, separate Worker-Prozesse und Hardware-Encoding werden erst nötig, wenn die private Zwei-Personen-Last das verlangt. `DERIVATIVE_TOOL_TIMEOUT_MS` begrenzt FFmpeg- und ffprobe-Unterprozesse. Sharp verarbeitet Bildjobs direkt und sequenziell im Backend-Prozess; ein sauberer Prozessstopp wartet auf den aktiven Job. `GET /health` prüft FFmpeg/ffprobe und meldet Queuezahlen, Rückstand sowie festhängende `processing`-Jobs. Fehlende Werkzeuge machen Readiness fehlerhaft; Rückstand oder festhängende Jobs werden als `degraded` gemeldet, lösen aber keine Restart-Schleife aus. `GET /health/live` bleibt davon unabhängig.
 
 ## Gemessene Stichprobe
 

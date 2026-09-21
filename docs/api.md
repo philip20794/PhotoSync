@@ -1,6 +1,6 @@
 # PhotoSync HTTP API v1
 
-Implementierter Stand: Instanzeinrichtung, zwei passwortlose Accounts, Geräte-Credentials, Pairing und Widerruf sowie Album-Metadaten, atomarer Original-Upload, asynchrone Medien-Derivate und Byte-Range-Streaming. Grundlegende Android-Albumfreigabe und persistente Original-Upload-Queue sind implementiert; Partnergalerie und inkrementelles Server-Change-Protokoll fehlen noch. Basis lokal: `http://127.0.0.1:3000`; zwischen Android und Server ausschließlich über einen vertrauenswürdigen HTTPS-Zugang betreiben. TLS-Terminierung ist weiterhin eine Betriebsaufgabe.
+Implementierter Stand: Instanzeinrichtung, zwei passwortlose Accounts, Geräte-Credentials, Pairing und Widerruf, Album-/Assetmetadaten, resumierbare Originaluploads, asynchrone Medien-Derivate, Byte-Range-Streaming, Change-Feed und 90-Tage-Papierkorb. Basis lokal: `http://127.0.0.1:3000`; zwischen Android und Server ausschließlich über einen vertrauenswürdigen HTTPS-Zugang betreiben. TLS-Terminierung ist weiterhin eine Betriebsaufgabe.
 
 ## Authentifizierung und gemeinsame Regeln
 
@@ -109,8 +109,16 @@ Geräte-Authentifizierung erforderlich. Widerruft einen Code, den eines der eige
 Geräte-Authentifizierung erforderlich. **200**, aktuelle Account-/Geräteidentität:
 
 ```json
-{"user":{"id":"<uuid>","displayName":"Alice"},"device":{"id":"<uuid>","name":"Alice Pixel","createdAt":"<UTC>","revokedAt":null}}
+{"user":{"id":"<uuid>","displayName":"Alice"},"device":{"id":"<uuid>","name":"Alice Pixel","createdAt":"<UTC>","revokedAt":null},"partner":{"id":"<uuid>","displayName":"Bob"}}
 ```
+
+`partner` ist `null`, solange kein Partneraccount existiert. Anzeigename und Gerätename werden mit `PATCH /v1/me` geändert:
+
+```json
+{"displayName":"Alice neu","deviceName":"Neues Pixel"}
+```
+
+Die Änderung wird gemeinsam für Account und Gerät committed und erscheint bei der nächsten `GET /v1/me`-Antwort beider Accounts.
 
 ### GET /v1/devices
 
@@ -140,7 +148,7 @@ DB-Backups enthalten nur Credential-/Code-Hashes, aber weiterhin private Metadat
 
 ## Health
 
-`GET /health` bleibt ohne Token erreichbar: **200** bei vorhandener Schema-Version 5 und zugänglichem Medienverzeichnis, sonst **503**. Keine Accounts, Geräte oder Credentials in dieser Antwort.
+`GET /health/live` ist eine von Datenbank, Medienpfad und Konvertierungsqueue unabhängige Liveness-Antwort. `GET /health` bleibt ebenfalls ohne Token erreichbar und prüft Schema-Version 9, Medienverzeichnis sowie bei aktiviertem Worker die Verfügbarkeit von `ffmpeg` und `ffprobe`. Fehlende harte Voraussetzungen liefern **503**. Die Antwort enthält zusätzlich Queuezahlen. Ein großer Rückstand oder ein über Tool-Timeout hinaus festhängender Job erscheint als `derivatives: "degraded"`, bleibt aber **200**, damit ein Neustart die persistente Queue nicht verschlimmert. Keine Accounts, Geräte oder Credentials werden ausgegeben.
 
 Offizielle Grundlagen: [Node.js Crypto](https://nodejs.org/docs/latest-v24.x/api/crypto.html), [Fastify Auth-Hooks](https://fastify.dev/docs/latest/Reference/Hooks/), [Rate-Limit-Plugin](https://github.com/fastify/fastify-rate-limit), [Prisma-Transaktionen](https://docs.prisma.io/docs/orm/v7/prisma-client/queries/transactions).
 
@@ -157,7 +165,7 @@ Legt ein Album für den authentifizierten Nutzer und das aufrufende Quellgerät 
 {"clientAlbumId":"primary:camera","title":"Kamera"}
 ```
 
-`clientAlbumId`: 1–255 Zeichen und innerhalb des Geräts eindeutig. `title`: 1–200 Zeichen. Erfolg **201**:
+`clientAlbumId`: 1–255 Zeichen und innerhalb des Geräts eindeutig. `title`: 1–200 Zeichen. `shared` (Standard `true`) steuert die Partnerfreigabe, `backedUp` (Standard `false`) aktiviert den dauerhaften privaten Backup-Marker. Erfolg **201**:
 
 ```json
 {
@@ -166,6 +174,7 @@ Legt ein Album für den authentifizierten Nutzer und das aufrufende Quellgerät 
   "title":"Kamera",
   "ownedByMe":true,
   "shared":true,
+  "backedUp":false,
   "sourceDeviceId":"<device-uuid>",
   "clientAlbumId":"primary:camera",
   "createdAt":"<UTC>",
@@ -173,7 +182,7 @@ Legt ein Album für den authentifizierten Nutzer und das aufrufende Quellgerät 
 }
 ```
 
-Ein erneuter Aufruf mit derselben `clientAlbumId` auf demselben Gerät liefert dieselbe Server-ID, aktualisiert den Titel und aktiviert die Freigabe erneut. Dadurch kann Android nach einem verlorenen Response sicher wiederholen. Andere Geräte desselben Accounts besitzen einen eigenen Namensraum.
+Ein erneuter Aufruf mit derselben `clientAlbumId` auf demselben Gerät liefert dieselbe Server-ID, aktualisiert den Titel und setzt die angeforderten Zustände idempotent. Ein bereits gesetzter privater Backup-Marker wird beim Ausschalten des Schalters nicht entfernt. Wird das Album später geteilt, werden vorhandene Assets wiederverwendet. Dadurch kann Android nach einem verlorenen Response sicher wiederholen. Andere Geräte desselben Accounts besitzen einen eigenen Namensraum.
 
 ### PATCH /v1/albums/{id}
 
@@ -246,6 +255,8 @@ Erfolg **201** erzeugt eine stabile Server-ID und Status `pending`:
   "height":3024,
   "durationMillis":null,
   "sha256":null,
+  "integrityStatus":"healthy",
+  "integrityError":null,
   "status":"pending",
   "derivatives":[],
   "createdAt":"<UTC>",
@@ -257,11 +268,11 @@ Der interne Speicherpfad wird nicht ausgegeben. Ein Partner darf keine Assets zu
 
 ### GET /v1/albums/{albumId}/assets
 
-Liefert `{"assets":[...]}`. Der Eigentümer sieht alle Zustände. Der Partner sieht nur `ready`-Assets; `pending`, `uploading` und `failed` bleiben verborgen.
+Liefert `{"assets":[...]}`. Der Eigentümer sieht alle Zustände. Der Partner sieht nur `ready`-Assets mit `integrityStatus=healthy`; `pending`, `uploading` und `failed` bleiben verborgen.
 
 ### GET /v1/assets/{id}
 
-Liefert die oben gezeigten Metadaten. Der Eigentümer kann jeden Assetstatus lesen, der Partner ausschließlich `ready`. Sonst **404**. Nach erfolgreichem Originalupload enthält `derivatives` die beiden persistierten Varianten, zum Beispiel:
+Liefert die oben gezeigten Metadaten. Der Eigentümer kann jeden verfügbaren Assetstatus lesen, der Partner ausschließlich `ready` mit gesunder Originalintegrität. Sonst **404**. Nach erfolgreichem Originalupload enthält `derivatives` die beiden persistierten Varianten, zum Beispiel:
 
 ```json
 {
@@ -276,40 +287,58 @@ Erlaubte Derivatstatus sind `pending`, `processing`, `ready` und `failed`. Inter
 
 ## Original-Upload und Varianten
 
-### PUT /v1/assets/{id}/original
+### POST /v1/assets/{id}/upload-session
 
-Nur der Asset-Eigentümer darf das einmalige Original hochladen. Voraussetzungen:
+Nur der Eigentümer darf für ein `pending`-Asset eine Sitzung anlegen. Wiederholung liefert dieselbe noch gültige Sitzung und den maßgeblichen serverbestätigten Offset. Die Antwort lautet:
+
+```json
+{"id":"<session-uuid>","assetId":"<asset-uuid>","offset":"4194304","size":"12000000","maxChunkBytes":"8388608","expiresAt":"<UTC>","completed":false,"asset":null}
+```
+
+### DELETE /v1/assets/{id}/upload
+
+Nur der Eigentümer darf eine unvollständige Uploadressource abbrechen. Der Server claimt eine offene Sitzung, entfernt Part und noch nicht committetes Ziel idempotent und löscht die Metadatenzeile. Ist die Ressource wegen einer verlorenen Abschlussantwort bereits `ready`, verwendet die Route die normale 90-Tage-Papierkorblogik. Aktive fremde Claims liefern **409**; Wiederholung nach erfolgreicher Bereinigung liefert **404** und wird von Android ebenfalls als abgeschlossen behandelt.
+
+### PATCH /v1/upload-sessions/{sessionId}
+
+Ein Chunk benötigt:
 
 - `Content-Type: application/octet-stream`
-- explizites, positives `Content-Length`
-- Body enthält exakt die beim Asset deklarierte Byteanzahl
-- Länge liegt innerhalb von `MAX_UPLOAD_BYTES`
+- explizites, positives `Content-Length` bis `MAX_UPLOAD_CHUNK_BYTES`
+- `Upload-Offset` exakt gleich dem letzten serverbestätigten Offset
+- Body enthält exakt die deklarierte Chunklänge und überschreitet die Assetgröße nicht
 
 Beispiel:
 
 ```sh
 curl --fail-with-body \
-  -X PUT \
+  -X PATCH \
   -H "Authorization: Bearer $DEVICE_TOKEN" \
   -H "Content-Type: application/octet-stream" \
-  -H "Content-Length: $(wc -c < test.jpg)" \
-  --data-binary @test.jpg \
-  "http://127.0.0.1:3000/v1/assets/$ASSET_ID/original"
+  -H "Upload-Offset: 0" \
+  -H "Content-Length: $(wc -c < chunk.bin)" \
+  --data-binary @chunk.bin \
+  "http://127.0.0.1:3000/v1/upload-sessions/$UPLOAD_SESSION_ID"
 ```
 
-Der Server streamt in eine zufällige `.part`-Datei, zählt Bytes und berechnet SHA-256. Erst nach vollständigem Schreiben, Dateisynchronisierung und atomarer Umbenennung setzt er das Asset auf `ready`. In derselben Datenbanktransaktion entstehen je ein `thumbnail`- und `optimized`-Job. Erfolg **200** liefert die Assetmetadaten mit berechnetem `sha256` und beiden Jobs im Status `pending`; die Konvertierung läuft danach im Hintergrund.
+Nach jedem synchronisierten Teilstück bestätigt **200** den neuen Offset. Der letzte Chunk löst die Prüfung der Gesamtgröße und SHA-256 aus, danach atomare Umbenennung und den transaktionalen Wechsel auf `ready` einschließlich beider Derivatjobs. Die Abschlussantwort hat `completed:true` und enthält das fertige Asset. Sitzung, Offset, Part-Pfad und Ablaufzeit liegen in PostgreSQL; Android speichert Sitzungs-ID und Offset in Room. Ein Heartbeat verlängert den exklusiven Chunk-Claim. Nach einem Crash werden ausschließlich abgelaufene Leases übernommen: unbestätigte Dateibytes werden auf den DB-Offset gekürzt, eine bereits atomar umbenannte vollständige Datei wird fertig committed. Abgelaufene Sitzungen werden idempotent bereinigt.
 
 Fehler:
 
-- **411 LENGTH_REQUIRED** bei fehlendem/ungültigem `Content-Length`.
-- **413 UPLOAD_TOO_LARGE** oberhalb des Limits.
+- **400 INVALID_UPLOAD_HEADERS** bei fehlendem/ungültigem `Content-Length` oder `Upload-Offset`.
+- **409 UPLOAD_OFFSET_MISMATCH** beziehungsweise **409 CONFLICT** bei falschem Offset oder aktivem Parallel-Claim.
+- **413 UPLOAD_CHUNK_TOO_LARGE** oberhalb des Chunklimits.
 - **415 UNSUPPORTED_MEDIA_TYPE** bei anderem Content-Type.
-- **422 UPLOAD_SIZE_MISMATCH** wenn Header oder tatsächlich empfangene Bytes nicht zur deklarierten Größe passen.
+- **422 UPLOAD_CHUNK_INVALID/UPLOAD_SIZE_MISMATCH** bei Bereichs- oder Längenfehlern.
 - **422 UPLOAD_HASH_MISMATCH** wenn die berechnete SHA-256 nicht `expectedSha256` entspricht.
-- **409 CONFLICT** wenn das Asset nicht mehr `pending` ist.
+- **507 STORAGE_FULL** bei serverseitigem `ENOSPC`; die bestätigte Sitzung bleibt fortsetzbar.
 - **404** bei fremdem/unbekanntem Asset.
 
-Ein während des Streams fehlgeschlagener Versuch setzt das Asset auf `failed` und entfernt seine temporäre Datei bestmöglich. Nach einem fehlgeschlagenen Versuch wiederholt der Client zuerst den idempotenten Metadaten-POST; dieser setzt dasselbe Asset wieder auf `pending`. Bereits bestätigte `ready`-Assets werden nicht erneut übertragen. Byteweise Wiederaufnahme innerhalb eines Uploads ist noch nicht implementiert.
+Transport- und Speicherfehler verwerfen nur den noch nicht bestätigten Chunk. Der Client ruft den Session-POST erneut auf und setzt beim gelieferten Offset fort. Nur ein finaler Hashfehler setzt das Asset auf `failed`. Bereits bestätigte `ready`-Assets werden nicht erneut übertragen.
+
+### PUT /v1/assets/{id}/original
+
+Die bisherige Volluploadroute bleibt kompatibel. Sie verwendet intern dieselbe Sitzung/Finalisierung, akzeptiert aber nur eine Sitzung mit Offset 0 und verlangt das vollständige Original in einem Request. Neue Android-Clients verwenden die Chunkrouten.
 
 ### GET /v1/assets/{id}/original
 ### GET /v1/assets/{id}/thumbnail
@@ -319,23 +348,40 @@ Alle drei Routen benötigen ein aktives Gerätetoken und prüfen die aktuelle Al
 
 Ohne `Range` folgt **200** mit der gesamten Datei. Ein einzelner gültiger Bereich, beispielsweise `Range: bytes=1048576-2097151` oder `Range: bytes=-65536`, liefert **206**, `Content-Range` und genau diesen Abschnitt. Alle Antworten enthalten `Accept-Ranges: bytes`, geprüfte `Content-Length`, SHA-256 als `ETag`, MIME-Type und `Content-Disposition`; Mehrfachbereiche werden nicht unterstützt. Ungültige oder nicht erfüllbare Bereiche liefern **416 RANGE_NOT_SATISFIABLE** und `Content-Range: bytes */<Gesamtgröße>`.
 
-Nicht fertige oder unzugängliche Assets liefern **404**. Ein noch nicht fertiges oder fehlgeschlagenes Derivat liefert **409 DERIVATIVE_NOT_READY**. Fehlt eine laut Datenbank fertige Datei oder stimmt ihre Größe nicht, folgt **503 ORIGINAL_UNAVAILABLE** beziehungsweise **503 DERIVATIVE_UNAVAILABLE**.
+Nicht fertige oder unzugängliche Assets liefern **404**. Ein noch nicht fertiges oder fehlgeschlagenes Derivat liefert **409 DERIVATIVE_NOT_READY**. Fehlt eine laut Datenbank fertige Datei oder stimmen Größe oder SHA-256 nicht, folgt **503 ORIGINAL_UNAVAILABLE** beziehungsweise **503 DERIVATIVE_UNAVAILABLE**.
 
 ### POST /v1/assets/{id}/derivatives/retry
 
-Nur der Eigentümer kann fehlgeschlagene Derivate sofort erneut einplanen. Erfolg **202** setzt alle `failed`-Zeilen dieses Assets auf `pending`, löscht die interne Fehlermeldung und setzt den Versuchszähler zurück. `ready`- und derzeit `processing`-Varianten bleiben unberührt. Fremde, unbekannte oder nicht fertige Assets liefern **404**. Automatische Wiederholungen laufen unabhängig davon bis `DERIVATIVE_MAX_ATTEMPTS`.
+Nur der Eigentümer kann fehlgeschlagene Derivate sofort erneut einplanen. Erfolg **202** setzt alle `failed`-Zeilen dieses Assets auf `pending`, löscht die interne Fehlermeldung und setzt den Versuchszähler zurück. `ready`- und derzeit `processing`-Varianten bleiben unberührt. Fremde, unbekannte oder nicht fertige Assets liefern **404**. Permanente Fehler werden automatisch bis `DERIVATIVE_MAX_ATTEMPTS` versucht. Temporäre Infrastrukturfehler bleiben darüber hinaus mit begrenztem exponentiellem Backoff retryfähig und heilen nach Entfall der Ursache ohne manuellen Aufruf.
 
 ## Medienkonfiguration
 
-`MAX_UPLOAD_BYTES` begrenzt deklarierte und tatsächlich empfangene Originaluploads. `DERIVATIVE_WORKER_ENABLED`, `DERIVATIVE_POLL_INTERVAL_MS`, `DERIVATIVE_MAX_ATTEMPTS` und `DERIVATIVE_TOOL_TIMEOUT_MS` steuern den eingebauten Worker; Defaults und Grenzen stehen im Root-README. Originale und Derivate liegen nicht in PostgreSQL, sondern unter dem durch `NODE_ENV` gewählten `MEDIA_DEV_ROOT` beziehungsweise `MEDIA_PROD_ROOT`.
+`MAX_UPLOAD_BYTES` begrenzt die Assetgröße, `MAX_UPLOAD_CHUNK_BYTES` einen Request und `UPLOAD_SESSION_TTL_MS` die inaktive Sitzung. `API_REQUEST_TIMEOUT_MS` schützt normale Routen; Chunk- und Volluploads verwenden `UPLOAD_REQUEST_TIMEOUT_MS`. `UPLOAD_LEASE_MS` und `UPLOAD_RECOVERY_INTERVAL_MS` steuern exklusiven Claim und Recovery. Derivatkonfiguration steuert den eingebauten Worker. Originale, Parts und Derivate liegen vollständig unter dem durch `NODE_ENV` gewählten `MEDIA_DEV_ROOT` beziehungsweise `MEDIA_PROD_ROOT`.
 
 Der aktuelle Pfadaufbau ist intern:
 
 ```text
-uploads/<assetId>-<random>.part
+uploads/<assetId>-<uploadSessionId>.part
 originals/<ownerId>/<assetId>/original
 derivatives/<ownerId>/<assetId>/thumbnail.<webp|jpg>
 derivatives/<ownerId>/<assetId>/optimized.<webp|mp4>
 ```
 
 Clients dürfen daraus keine direkten URLs oder Dateisystempfade ableiten. Zugriff erfolgt ausschließlich über die authentifizierten Variantenrouten.
+
+
+### GET /v1/partner/albums
+
+Liefert ausschliesslich aktuell freigegebene Alben des anderen Accounts im selben Pair. Eigene Alben erscheinen nie in dieser Antwort. Jedes Album enthaelt assetCount (nur fertige Assets) und optional ein Cover mit assetId, Derivatversion und Hash. Das Cover verweist auf die normale autorisierte Thumbnail-Route; Albumuebersichten uebertragen keine Medienbytes.
+
+### Partnergalerie: Paging
+
+GET /v1/albums/{albumId}/assets akzeptiert limit zwischen 1 und 100 (Standard 60) und einen opaque cursor aus der vorherigen Antwort. Die Antwort enthaelt assets und nextCursor; die stabile absteigende Reihenfolge nach Erstellungszeit und ID erlaubt chronologisches Lazy-Paging. Partner erhalten weiterhin ausschliesslich ready-Assets.
+
+### Papierkorb und 90-Tage-Aufbewahrung
+
+`DELETE /v1/assets/{id}` verschiebt ein eigenes `ready`-Asset in den Papierkorb. `GET /v1/trash` listet ausschließlich eigene `deleted`-Assets und liefert `deletedAt`, `purgeAfter`, verbleibende Sekunden, ursprüngliches Album und verfügbare Varianten. `GET /v1/trash/assets/{id}/thumbnail` liefert nur dem Eigentümer die noch aufbewahrte Vorschau. `POST /v1/trash/assets/{id}/restore` sowie `POST /v1/trash/restore` stellen Assets ohne erneuten Upload wieder her.
+
+`DELETE /v1/trash/assets/{id}` löscht ein Asset sofort endgültig; `DELETE /v1/trash/assets` und `DELETE /v1/trash` löschen mehrere beziehungsweise alle eigenen Papierkorb-Assets. Der Server claimt das Asset mit einer Cleanup-Lease als `purging`, entfernt Original und Derivate, markiert danach `purged` und entfernt nicht mehr gültige Derivatmetadaten. Nach Beginn der Dateilöschung bleibt ein Fehler in `purging` retryfähig; Restore ist dann ausgeschlossen. Nur abgelaufene Leases werden nach einem Prozessabbruch übernommen. Die verbindliche automatische Aufbewahrung beträgt 90 Tage.
+
+Ein geteilter Lösch- oder Restore-Vorgang erzeugt genau eine fachliche DELETE- beziehungsweise RESTORE-Änderung. Rein private Auto-Backup-Assets erzeugen kein Partnerereignis. Nach physischer Bereinigung bleibt ein `purged`-Tombstone in PostgreSQL, damit ein lange offline gewesenes Gerät das Asset nicht wieder anlegt.

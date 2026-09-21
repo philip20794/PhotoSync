@@ -10,15 +10,22 @@ import de.photosync.data.local.AppDatabase
 import de.photosync.data.local.DeviceSessionEntity
 import de.photosync.data.local.SharedAlbumEntity
 import de.photosync.data.local.UploadQueueEntity
+import de.photosync.data.local.UploadStatus
 import de.photosync.data.media.MediaStoreRepository
+import de.photosync.data.media.MediaAccess
+import de.photosync.data.media.MediaInventory
+import de.photosync.data.media.currentMediaAccess
 import de.photosync.data.remote.CreateAlbumRequest
 import de.photosync.data.remote.CreateAssetRequest
 import de.photosync.data.remote.PhotoSyncApi
 import de.photosync.data.remote.SetAlbumSharingRequest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import retrofit2.HttpException
 import java.io.IOException
 import java.security.MessageDigest
@@ -32,26 +39,70 @@ internal class SyncEngine(
     private val api: PhotoSyncApi,
     private val session: DeviceSessionEntity,
     private val maxUploads: Int = 20,
+    private val beforeUpload: suspend () -> Unit = {},
+    private val mediaStore: MediaInventory = MediaStoreRepository(context),
+    private val mediaAccess: () -> MediaAccess = { currentMediaAccess(context.applicationContext) },
 ) {
     private val appContext = context.applicationContext
     private val resolver: ContentResolver = appContext.contentResolver
-    private val mediaStore = MediaStoreRepository(context)
     private val dao = database.syncDao()
 
-    suspend fun run(): SyncRunResult {
+    suspend fun run(allowMediaTransfers: Boolean = true): SyncRunResult {
         dao.recoverInterruptedUploads(System.currentTimeMillis())
-        if (!syncAlbumSharing()) return SyncRunResult(retry = true, moreWork = true)
         if (!inventorySharedAlbums()) return SyncRunResult(retry = true, moreWork = true)
+        if (!syncAlbumSharing()) return SyncRunResult(retry = true, moreWork = true)
+        for (item in dao.nextCancellations(session.deviceId, maxUploads)) {
+            val serverId = item.serverAssetId ?: continue
+            try {
+                api.cancelUpload(serverId)
+                dao.finishCancellation(item.clientAssetId, System.currentTimeMillis())
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                if (error.isAuthenticationFailure()) throw error
+                if (error is HttpException && error.code() == 404) {
+                    dao.finishCancellation(item.clientAssetId, System.currentTimeMillis())
+                } else {
+                    return SyncRunResult(retry = true, moreWork = true)
+                }
+            }
+        }
+        if (allowMediaTransfers && !prepareReplacements()) {
+            return SyncRunResult(retry = true, moreWork = true)
+        }
+        for (item in dao.nextDeletes(session.deviceId, maxUploads)) {
+            val serverId = item.serverAssetId ?: continue
+            try {
+                api.trashAsset(serverId)
+                finishDelete(item)
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                if (error.isAuthenticationFailure()) throw error
+                if (error is HttpException && error.code() == 404) {
+                    finishDelete(item)
+                } else if (error.isRetryable()) {
+                    dao.markDeleteRetry(item.clientAssetId, error.syncMessage(), System.currentTimeMillis())
+                    return SyncRunResult(retry = true, moreWork = true)
+                } else {
+                    dao.markDeleteRetry(item.clientAssetId, error.syncMessage(), System.currentTimeMillis())
+                    return SyncRunResult(retry = false, moreWork = true)
+                }
+            }
+        }
+        if (!allowMediaTransfers) {
+            return SyncRunResult(retry = false, moreWork = hasMoreWork())
+        }
 
         for (item in dao.nextUploads(session.deviceId, maxUploads)) {
             val album = dao.getAlbum(item.localAlbumId) ?: continue
-            if (!album.shareRequested || !album.remoteShared || album.serverAlbumId == null) continue
+            if ((!album.shareRequested && !album.backupRequested) || album.serverAlbumId == null) continue
             try {
+                beforeUpload()
                 upload(item, album)
             } catch (cancelled: CancellationException) {
-                dao.markRetry(item.clientAssetId, "Upload wurde unterbrochen", System.currentTimeMillis())
+                withContext(NonCancellable) { dao.markRetry(item.clientAssetId, "Upload wurde unterbrochen", System.currentTimeMillis()) }
                 throw cancelled
             } catch (error: Throwable) {
+                if (error.isAuthenticationFailure()) throw error
                 val message = error.syncMessage()
                 if (error.isRetryable()) {
                     dao.markRetry(item.clientAssetId, message, System.currentTimeMillis())
@@ -60,15 +111,50 @@ internal class SyncEngine(
                 dao.markFailed(item.clientAssetId, message, System.currentTimeMillis())
             }
         }
-        return SyncRunResult(retry = false, moreWork = dao.hasRemainingUploads(session.deviceId))
+        return SyncRunResult(retry = false, moreWork = hasMoreWork())
     }
+
+    private suspend fun prepareReplacements(): Boolean {
+        for (item in dao.nextReplacements(session.deviceId, maxUploads)) {
+            try {
+                val replacementHash = computeSha256(item)
+                if (replacementHash == item.sha256) {
+                    dao.markReplacementUnchanged(item.clientAssetId, replacementHash, System.currentTimeMillis())
+                } else {
+                    dao.markReplacementChanged(item.clientAssetId, replacementHash, System.currentTimeMillis())
+                }
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                dao.markReplacementRetry(item.clientAssetId, error.syncMessage(), System.currentTimeMillis())
+                return false
+            }
+        }
+        return true
+    }
+
+    private suspend fun finishDelete(item: UploadQueueEntity) {
+        if (item.status == UploadStatus.REPLACEMENT_DELETE_PENDING) {
+            dao.finishReplacementDelete(item.clientAssetId, System.currentTimeMillis())
+        } else {
+            dao.markDeleted(item.clientAssetId, System.currentTimeMillis())
+        }
+    }
+
+    private suspend fun hasMoreWork(): Boolean =
+        dao.hasRemainingUploads(session.deviceId) || dao.hasRemainingDeletes(session.deviceId) ||
+            dao.hasRemainingReconciliation(session.deviceId)
 
     private suspend fun syncAlbumSharing(): Boolean {
         for (album in dao.getAlbumsNeedingRemoteUpdate(session.deviceId)) {
             try {
-                if (album.shareRequested) {
-                    val remote = api.createAlbum(CreateAlbumRequest(album.mediaStoreAlbumId, album.title))
-                    dao.markRemoteAlbum(album.localAlbumId, remote.id, remote.shared)
+                if (album.shareRequested || album.backupRequested) {
+                    val remote = api.createAlbum(CreateAlbumRequest(
+                        album.mediaStoreAlbumId,
+                        album.title,
+                        shared = album.shareRequested,
+                        backedUp = album.backupRequested,
+                    ))
+                    dao.markRemoteAlbum(album.localAlbumId, remote.id, remote.shared, remote.backedUp)
                 } else {
                     val serverId = album.serverAlbumId ?: continue
                     api.setAlbumSharing(serverId, SetAlbumSharingRequest(false))
@@ -76,6 +162,7 @@ internal class SyncEngine(
                 }
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
+                if (error.isAuthenticationFailure()) throw error
                 dao.markAlbumError(album.localAlbumId, error.syncMessage())
                 if (error.isRetryable()) return false
             }
@@ -83,13 +170,45 @@ internal class SyncEngine(
         return true
     }
 
-    private suspend fun inventorySharedAlbums(): Boolean {
+    suspend fun inventorySharedAlbums(): Boolean {
+        val accessAtStart = mediaAccess()
+        val server = database.appStateDao().getServer()
+        val scope = server?.let { remoteScope(it.baseUrl, session.userId) }
+        val autoBackup = scope?.let { database.settingsDao().get(it)?.autoBackupEnabled } == true
+        if (autoBackup) {
+            if (accessAtStart != MediaAccess.NONE) {
+                try {
+                    for (local in mediaStore.loadAlbums()) {
+                        dao.enableBackup(SharedAlbumEntity(
+                            localAlbumId = session.deviceId + "|" + local.id,
+                            mediaStoreAlbumId = local.id,
+                            sourceDeviceId = session.deviceId,
+                            volumeName = local.volumeName,
+                            bucketId = local.bucketId,
+                            title = local.name,
+                            shareRequested = false,
+                            backupRequested = true,
+                        ))
+                    }
+                } catch (error: Throwable) {
+                    if (error is CancellationException) throw error
+                    if (error.isRetryable()) return false
+                }
+            }
+        } else {
+            // The account-wide switch is evaluated by every device's periodic
+            // worker, so an older device cannot keep private inventory active
+            // after another session disabled the setting.
+            dao.disableAutoBackup(session.deviceId)
+        }
         for (album in dao.getRequestedAlbums(session.deviceId)) {
-            if (!album.remoteShared || album.serverAlbumId == null) continue
+            if (accessAtStart == MediaAccess.NONE) continue
             try {
-                mediaStore.scanAlbum(album.volumeName, album.bucketId) { candidates ->
+                val seenMediaStoreIds = HashSet<Long>()
+                val scan = mediaStore.scanAlbum(album.volumeName, album.bucketId) { candidates ->
+                    seenMediaStoreIds += candidates.map { it.mediaStoreId }
                     val now = System.currentTimeMillis()
-                    dao.enqueue(candidates.map { media ->
+                    dao.enqueueDiscovered(candidates.map { media ->
                         val stableSource = "${session.deviceId}:${album.volumeName}:${media.mediaStoreId}"
                         UploadQueueEntity(
                             clientAssetId = "ms_${stableSource.sha256()}",
@@ -102,9 +221,28 @@ internal class SyncEngine(
                             width = media.width,
                             height = media.height,
                             durationMillis = media.durationMillis,
+                            mediaStoreId = media.mediaStoreId,
+                            dateModifiedSeconds = media.dateModifiedSeconds,
                             updatedAt = now,
                         )
                     })
+                }
+                if (scan.complete && accessAtStart == MediaAccess.FULL && mediaAccess() == MediaAccess.FULL) {
+                    for (existing in dao.knownUploads(album.localAlbumId)) {
+                        if (existing.mediaStoreId !in seenMediaStoreIds) {
+                            when (existing.status) {
+                                UploadStatus.COMPLETE ->
+                                    dao.markDeletePending(existing.clientAssetId, System.currentTimeMillis())
+                                UploadStatus.DELETED, UploadStatus.ABANDONED,
+                                UploadStatus.DELETE_PENDING, UploadStatus.REPLACEMENT_DELETE_PENDING,
+                                UploadStatus.CANCEL_PENDING, UploadStatus.REPLACEMENT_CANCEL_PENDING -> Unit
+                                else -> dao.markMissingBeforeComplete(
+                                    existing.clientAssetId,
+                                    System.currentTimeMillis(),
+                                )
+                            }
+                        }
+                    }
                 }
                 dao.markScanned(album.localAlbumId, System.currentTimeMillis())
             } catch (error: Throwable) {
@@ -159,23 +297,53 @@ internal class SyncEngine(
             dao.markComplete(resolved.clientAssetId, remote.id, System.currentTimeMillis())
             return
         }
-        check(remote.status == "pending") { "Server verarbeitet diesen Upload noch" }
+        check(remote.status in setOf("pending", "uploading")) { "Serverstatus erlaubt keine Uploadfortsetzung" }
 
-        dao.markUploading(resolved.clientAssetId, 0, System.currentTimeMillis())
-        var lastPersistedBytes = 0L
-        var lastPersistedAt = SystemClock.elapsedRealtime()
-        val body = ContentUriRequestBody(resolver, Uri.parse(resolved.contentUri), resolved.fileSize) { bytes ->
-            val now = SystemClock.elapsedRealtime()
-            if (bytes == resolved.fileSize || bytes - lastPersistedBytes >= PROGRESS_BYTES || now - lastPersistedAt >= PROGRESS_MILLIS) {
-                runBlocking(Dispatchers.IO) {
-                    dao.updateUploadProgress(resolved.clientAssetId, bytes, System.currentTimeMillis())
-                }
-                lastPersistedBytes = bytes
-                lastPersistedAt = now
-            }
+        var sessionState = api.createUploadSession(remote.id)
+        check(sessionState.assetId == remote.id && sessionState.size.toLong() == resolved.fileSize) {
+            "Upload-Session passt nicht zum Medium"
         }
-        val uploaded = api.uploadOriginal(remote.id, body)
-        check(uploaded.status == "ready" && uploaded.sha256 == hash) { "Server hat das Original nicht bestätigt" }
+        var offset = sessionState.offset.toLong()
+        check(offset in 0..resolved.fileSize) { "Server meldet einen ungültigen Upload-Offset" }
+        dao.saveUploadSession(resolved.clientAssetId, sessionState.id, offset, System.currentTimeMillis())
+        while (!sessionState.completed) {
+            currentCoroutineContext().ensureActive()
+            val serverChunkLimit = sessionState.maxChunkBytes.toLong()
+            check(serverChunkLimit > 0) { "Server meldet eine ungültige Chunkgröße" }
+            val chunkLength = minOf(UPLOAD_CHUNK_BYTES, serverChunkLimit, resolved.fileSize - offset)
+            check(chunkLength > 0) { "Upload-Session wurde ohne fertiges Asset abgeschlossen" }
+            var lastPersistedBytes = offset
+            var lastPersistedAt = SystemClock.elapsedRealtime()
+            val body = ContentUriRequestBody(
+                resolver = resolver,
+                uri = Uri.parse(resolved.contentUri),
+                totalLength = resolved.fileSize,
+                offset = offset,
+                chunkLength = chunkLength,
+            ) { bytes ->
+                val now = SystemClock.elapsedRealtime()
+                if (bytes == resolved.fileSize || bytes - lastPersistedBytes >= PROGRESS_BYTES ||
+                    now - lastPersistedAt >= PROGRESS_MILLIS
+                ) {
+                    runBlocking(Dispatchers.IO) {
+                        dao.updateUploadProgress(resolved.clientAssetId, bytes, System.currentTimeMillis())
+                    }
+                    lastPersistedBytes = bytes
+                    lastPersistedAt = now
+                }
+            }
+            sessionState = api.uploadChunk(sessionState.id, offset.toString(), body)
+            val nextOffset = sessionState.offset.toLong()
+            check(sessionState.id == dao.getUpload(resolved.clientAssetId)?.uploadSessionId &&
+                nextOffset in (offset + 1)..resolved.fileSize
+            ) { "Server hat den Upload-Offset nicht monoton bestätigt" }
+            offset = nextOffset
+            dao.saveUploadSession(resolved.clientAssetId, sessionState.id, offset, System.currentTimeMillis())
+        }
+        val uploaded = requireNotNull(sessionState.asset) { "Server hat kein fertiges Asset bestätigt" }
+        check(uploaded.status == "ready" && uploaded.sha256 == hash && offset == resolved.fileSize) {
+            "Server hat das Original nicht bestätigt"
+        }
         dao.markComplete(resolved.clientAssetId, remote.id, System.currentTimeMillis())
     }
 
@@ -215,6 +383,7 @@ internal class SyncEngine(
         stream.use {
             val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
             while (true) {
+                ensureActive()
                 val count = it.read(buffer)
                 if (count < 0) break
                 digest.update(buffer, 0, count)
@@ -228,6 +397,7 @@ internal class SyncEngine(
     private companion object {
         const val PROGRESS_BYTES = 1024L * 1024L
         const val PROGRESS_MILLIS = 750L
+        const val UPLOAD_CHUNK_BYTES = 4L * 1024L * 1024L
     }
 }
 
@@ -240,9 +410,11 @@ private fun String.sanitizedFileName(): String = replace(Regex("[\\u0000-\\u001f
     .ifBlank { "medium" }
     .take(255)
 
-private fun Throwable.isRetryable(): Boolean = when (this) {
+internal fun Throwable.isAuthenticationFailure(): Boolean = this is HttpException && code() == 401
+
+internal fun Throwable.isRetryable(): Boolean = when (this) {
     is IOException, is SecurityException -> true
-    is HttpException -> code() == 401 || code() == 408 || code() == 409 || code() == 429 || code() >= 500
+    is HttpException -> code() == 408 || code() == 409 || code() == 429 || code() >= 500
     else -> false
 }
 

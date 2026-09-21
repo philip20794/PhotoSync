@@ -12,7 +12,7 @@ import java.util.concurrent.TimeUnit
 object RetrofitFactory {
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
 
-    fun create(baseUrl: String, credentials: SecureCredentialStore? = null): PhotoSyncApi {
+    fun create(baseUrl: String, credentials: SecureCredentialStore? = null, fixedToken: String? = null): PhotoSyncApi {
         val client = OkHttpClient.Builder()
             .retryOnConnectionFailure(false)
             .connectTimeout(10, TimeUnit.SECONDS)
@@ -20,7 +20,9 @@ object RetrofitFactory {
             .writeTimeout(30, TimeUnit.MINUTES)
             .callTimeout(0, TimeUnit.SECONDS)
             .apply {
-                if (credentials != null) addInterceptor(DeviceTokenInterceptor(credentials))
+                if (fixedToken != null) addInterceptor { chain ->
+                    chain.proceed(chain.request().newBuilder().header("Authorization", "Bearer " + fixedToken).build())
+                } else if (credentials != null) addInterceptor(DeviceTokenInterceptor(credentials))
             }
             .build()
         return Retrofit.Builder()

@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { mkdir, open, readdir, rename, rmdir, stat, unlink } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import sharp from 'sharp';
 import type { Logger } from 'pino';
@@ -54,10 +54,22 @@ async function sha256File(path: string): Promise<string> {
   return digest.digest('hex');
 }
 
+async function fsyncDirectory(path: string): Promise<void> {
+  const handle = await open(path, 'r');
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+
 async function durableRename(temporaryPath: string, finalPath: string): Promise<void> {
   const handle = await open(temporaryPath, 'r');
   try { await handle.sync(); } finally { await handle.close(); }
   await rename(temporaryPath, finalPath);
+  await fsyncDirectory(dirname(finalPath));
+}
+
+async function discardFinalOutput(config: Config, storagePath: string): Promise<void> {
+  const path = withinMediaRoot(config.mediaRoot, storagePath);
+  await unlink(path).catch(() => undefined);
+  await rmdir(dirname(path)).catch(() => undefined);
 }
 
 function runTool(command: string, args: string[], timeoutMs: number): Promise<string> {
@@ -140,15 +152,25 @@ async function createVideoDerivative(sourcePath: string, temporaryPath: string, 
   return { mimeType: 'video/mp4', ...metadata };
 }
 
-export async function generateDerivative(config: Config, asset: SourceAsset, kind: DerivativeKind): Promise<OutputInfo> {
+export async function generateDerivative(config: Config, asset: SourceAsset, kind: DerivativeKind, attemptId = randomUUID()): Promise<OutputInfo> {
   const sourcePath = withinMediaRoot(config.mediaRoot, asset.storagePath);
   const extension = asset.mimeType.startsWith('video/')
     ? kind === 'thumbnail' ? 'jpg' : 'mp4'
     : 'webp';
-  const storagePath = `derivatives/${asset.ownerId}/${asset.id}/${kind}.${extension}`;
+  // A final path belongs to exactly one claim. A worker which loses its lease may
+  // delete this path, but can never delete a newer worker's committed output.
+  const storagePath = `derivatives/${asset.ownerId}/${asset.id}/${kind}-${attemptId}.${extension}`;
   const finalPath = withinMediaRoot(config.mediaRoot, storagePath);
-  const temporaryPath = `${finalPath}.${randomUUID()}.part`;
+  const temporaryPath = `${finalPath}.part`;
   await mkdir(dirname(finalPath), { recursive: true, mode: 0o700 });
+  // Pre-lease builds used a different .part naming scheme. Those names cannot
+  // belong to a live claim in this build and are safe to reap immediately.
+  for (const name of await readdir(dirname(finalPath))) {
+    if (name.endsWith('.part') &&
+        !/^(?:thumbnail|optimized)-[0-9a-f-]{36}\.(?:webp|jpg|mp4)\.part$/.test(name)) {
+      await unlink(resolve(dirname(finalPath), name)).catch(() => undefined);
+    }
+  }
   try {
     const metadata = asset.mimeType.startsWith('image/')
       ? await createImageDerivative(sourcePath, temporaryPath, kind)
@@ -171,10 +193,75 @@ export async function enqueueDerivatives(client: PrismaClient, assetId: string):
   });
 }
 
-export function createDerivativeWorker(client: PrismaClient, config: Config, logger: Logger) {
+type DerivativeWorkerHooks = {
+  beforeGenerate?: (assetId: string, kind: DerivativeKind, leaseId: string) => Promise<void>;
+  afterFileFinalized?: (assetId: string, storagePath: string) => Promise<void>;
+  processingLeaseMs?: number;
+};
+
+function transientDerivativeError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const code = 'code' in error && typeof error.code === 'string' ? error.code : '';
+  if (['ENOSPC', 'EDQUOT', 'EMFILE', 'ENFILE', 'EAGAIN', 'EBUSY', 'EIO', 'ECONNRESET', 'ETIMEDOUT'].includes(code)) return true;
+  return /no space left|disk quota|timed out|temporar|database|connection|lease renewal/i.test(error.message);
+}
+
+export function createDerivativeWorker(
+  client: PrismaClient,
+  config: Config,
+  logger: Logger,
+  hooks: DerivativeWorkerHooks = {},
+) {
   let timer: NodeJS.Timeout | undefined;
   let active: Promise<void> | undefined;
   let stopping = false;
+  let started = false;
+  let reconciliationCursor: string | undefined;
+  let nextReconciliationAt = 0;
+  const processingLeaseMs = hooks.processingLeaseMs ??
+    (config.derivativeToolTimeoutMs + Math.max(30_000, config.derivativePollIntervalMs * 2));
+  const heartbeatIntervalMs = Math.max(25, Math.floor(processingLeaseMs / 3));
+
+  async function cleanupOldClaimOutputs(kind: string, committedStoragePath: string): Promise<number> {
+    const committedPath = withinMediaRoot(config.mediaRoot, committedStoragePath);
+    const directory = dirname(committedPath);
+    const keep = basename(committedPath);
+    let names: string[];
+    try { names = await readdir(directory); } catch { return 0; }
+    const cutoff = Date.now() - processingLeaseMs * 2;
+    let removed = 0;
+    for (const name of names) {
+      if (name === keep || !name.startsWith(kind + '-')) continue;
+      const path = resolve(directory, name);
+      try {
+        const file = await stat(path);
+        if (file.isFile() && file.mtimeMs <= cutoff) {
+          await unlink(path);
+          removed += 1;
+        }
+      } catch { /* A concurrent cleanup or purge already won. */ }
+    }
+    return removed;
+  }
+
+  async function recoverStaleJobs(now = new Date()): Promise<number> {
+    const recovered = await client.assetDerivative.updateMany({
+      where: {
+        status: 'processing',
+        OR: [
+          { processingLeaseExpiresAt: null },
+          { processingLeaseExpiresAt: { lte: now } },
+        ],
+      },
+      data: {
+        status: 'pending',
+        processingLeaseId: null,
+        processingLeaseExpiresAt: null,
+        nextAttemptAt: now,
+      },
+    });
+    return recovered.count;
+  }
 
   async function ensureJobs(): Promise<void> {
     for (const kind of kinds) {
@@ -188,11 +275,66 @@ export function createDerivativeWorker(client: PrismaClient, config: Config, log
     }
   }
 
+  async function reconcileReadyDerivatives(limit = 100): Promise<number> {
+    let candidates = await client.assetDerivative.findMany({
+      where: { status: 'ready', asset: { status: 'ready' } },
+      orderBy: { id: 'asc' },
+      ...(reconciliationCursor ? { cursor: { id: reconciliationCursor }, skip: 1 } : {}),
+      take: limit,
+    });
+    if (candidates.length === 0 && reconciliationCursor) {
+      reconciliationCursor = undefined;
+      candidates = await client.assetDerivative.findMany({
+        where: { status: 'ready', asset: { status: 'ready' } },
+        orderBy: { id: 'asc' },
+        take: limit,
+      });
+    }
+    reconciliationCursor = candidates.length === limit ? candidates.at(-1)?.id : undefined;
+    let repaired = 0;
+    for (const candidate of candidates) {
+      if (!candidate.storagePath || candidate.fileSize === null || !candidate.sha256) continue;
+      const path = withinMediaRoot(config.mediaRoot, candidate.storagePath);
+      let valid = false;
+      try {
+        const file = await stat(path);
+        valid = file.isFile() && BigInt(file.size) === candidate.fileSize &&
+          await sha256File(path) === candidate.sha256;
+      } catch { valid = false; }
+      if (valid) {
+        await cleanupOldClaimOutputs(candidate.kind, candidate.storagePath);
+        continue;
+      }
+      const reset = await client.assetDerivative.updateMany({
+        where: { id: candidate.id, status: 'ready', sha256: candidate.sha256, asset: { status: 'ready' } },
+        data: {
+          status: 'pending', mimeType: null, storagePath: null, fileSize: null,
+          width: null, height: null, durationMillis: null, sha256: null,
+          attempts: 0, lastError: 'Derivative storage reconciliation', nextAttemptAt: new Date(),
+          processingLeaseId: null, processingLeaseExpiresAt: null,
+        },
+      });
+      if (reset.count === 1) {
+        await unlink(path).catch((error) => {
+          if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+            logger.warn({ event: 'derivative_reconcile_unlink_failed', derivativeId: candidate.id },
+              'Invalid derivative will be replaced by the retry');
+          }
+        });
+      }
+      repaired += reset.count;
+    }
+    return repaired;
+  }
+
   async function processOne(): Promise<boolean> {
     const now = new Date();
     const candidate = await client.assetDerivative.findFirst({
       where: {
-        attempts: { lt: config.derivativeMaxAttempts },
+        OR: [
+          { attempts: { lt: config.derivativeMaxAttempts } },
+          { lastError: { startsWith: '[transient] ' } },
+        ],
         nextAttemptAt: { lte: now },
         status: { in: ['pending', 'failed'] },
         asset: { status: 'ready' },
@@ -201,32 +343,92 @@ export function createDerivativeWorker(client: PrismaClient, config: Config, log
       orderBy: [{ nextAttemptAt: 'asc' }, { createdAt: 'asc' }],
     });
     if (!candidate) return false;
+    const leaseId = randomUUID();
     const claimed = await client.assetDerivative.updateMany({
       where: { id: candidate.id, status: candidate.status, attempts: candidate.attempts },
-      data: { status: 'processing', lastError: null },
+      data: {
+        status: 'processing',
+        processingLeaseId: leaseId,
+        processingLeaseExpiresAt: new Date(now.getTime() + processingLeaseMs),
+      },
     });
     if (claimed.count !== 1) return true;
+    let output: OutputInfo | undefined;
+    let committed = false;
+    let heartbeatError: unknown;
+    let heartbeatInFlight = Promise.resolve();
+    const heartbeat = setInterval(() => {
+      heartbeatInFlight = heartbeatInFlight.then(async () => {
+        const renewed = await client.assetDerivative.updateMany({
+          where: { id: candidate.id, status: 'processing', processingLeaseId: leaseId },
+          data: { processingLeaseExpiresAt: new Date(Date.now() + processingLeaseMs) },
+        });
+        if (renewed.count !== 1) throw new Error('Derivative lease was lost');
+      }).catch((error) => { heartbeatError = error; });
+    }, heartbeatIntervalMs);
+    heartbeat.unref();
     try {
-      const output = await generateDerivative(config, candidate.asset, candidate.kind as DerivativeKind);
-      await client.assetDerivative.update({ where: { id: candidate.id }, data: {
+      await hooks.beforeGenerate?.(candidate.assetId, candidate.kind as DerivativeKind, leaseId);
+      output = await generateDerivative(config, candidate.asset, candidate.kind as DerivativeKind, leaseId);
+      await hooks.afterFileFinalized?.(candidate.assetId, output.storagePath);
+      clearInterval(heartbeat);
+      await heartbeatInFlight;
+      if (heartbeatError) throw heartbeatError;
+      const updated = await client.assetDerivative.updateMany({ where: {
+        id: candidate.id, status: 'processing', processingLeaseId: leaseId,
+        asset: { status: 'ready' },
+      }, data: {
         status: 'ready', mimeType: output.mimeType, storagePath: output.storagePath,
         fileSize: output.fileSize, width: output.width, height: output.height,
         durationMillis: output.durationMillis, sha256: output.sha256, lastError: null,
+        processingLeaseId: null, processingLeaseExpiresAt: null,
       } });
+      if (updated.count !== 1) {
+        await discardFinalOutput(config, output.storagePath);
+        await client.assetDerivative.updateMany({
+          where: { id: candidate.id, status: 'processing', processingLeaseId: leaseId },
+          data: {
+            status: 'pending', processingLeaseId: null, processingLeaseExpiresAt: null,
+            nextAttemptAt: new Date(),
+          },
+        }).catch(() => undefined);
+        return true;
+      }
+      committed = true;
+      await cleanupOldClaimOutputs(candidate.kind, output.storagePath);
       logger.info({ event: 'derivative_ready', assetId: candidate.assetId, kind: candidate.kind,
         bytes: output.fileSize.toString() }, 'Derivative generated');
     } catch (error) {
+      if (output && !committed) {
+        await discardFinalOutput(config, output.storagePath);
+      }
       const attempts = candidate.attempts + 1;
-      const delayMs = Math.min(3_600_000, 30_000 * (2 ** Math.max(0, attempts - 1)));
-      await client.assetDerivative.update({ where: { id: candidate.id }, data: {
-        status: 'failed', attempts, lastError: safeMessage(error), nextAttemptAt: new Date(Date.now() + delayMs),
+      const transient = output !== undefined || transientDerivativeError(error);
+      const delayMs = Math.min(24 * 60 * 60 * 1000,
+        30_000 * (2 ** Math.min(11, Math.max(0, attempts - 1))));
+      const message = safeMessage(error);
+      await client.assetDerivative.updateMany({ where: {
+        id: candidate.id, status: 'processing', processingLeaseId: leaseId,
+      }, data: {
+        status: 'failed', attempts, lastError: transient ? `[transient] ${message}` : message,
+        nextAttemptAt: new Date(Date.now() + delayMs),
+        processingLeaseId: null, processingLeaseExpiresAt: null,
       } }).catch(() => undefined);
-      logger.warn({ event: 'derivative_failed', assetId: candidate.assetId, kind: candidate.kind, attempts }, 'Derivative generation failed');
+      logger.warn({ event: 'derivative_failed', assetId: candidate.assetId, kind: candidate.kind,
+        attempts, transient }, 'Derivative generation failed');
+    } finally {
+      clearInterval(heartbeat);
+      await heartbeatInFlight.catch(() => undefined);
     }
     return true;
   }
 
   async function runOnce(): Promise<number> {
+    await recoverStaleJobs();
+    if (Date.now() >= nextReconciliationAt) {
+      await reconcileReadyDerivatives();
+      nextReconciliationAt = Date.now() + 6 * 60 * 60 * 1000;
+    }
     await ensureJobs();
     let count = 0;
     while (!stopping && await processOne()) count += 1;
@@ -245,12 +447,47 @@ export function createDerivativeWorker(client: PrismaClient, config: Config, log
   return {
     async start() {
       stopping = false;
-      await client.assetDerivative.updateMany({ where: { status: 'processing' }, data: { status: 'pending', nextAttemptAt: new Date() } });
+      await recoverStaleJobs();
+      started = true;
       schedule();
     },
     runOnce,
+    reconcileReadyDerivatives,
+    async diagnostics() {
+      const timeout = Math.min(5000, config.derivativeToolTimeoutMs);
+      const tools = await Promise.allSettled([
+        runTool('ffmpeg', ['-version'], timeout),
+        runTool('ffprobe', ['-version'], timeout),
+      ]);
+      const ffmpegAvailable = tools[0]?.status === 'fulfilled';
+      const ffprobeAvailable = tools[1]?.status === 'fulfilled';
+      const toolsAvailable = ffmpegAvailable && ffprobeAvailable;
+      const now = new Date();
+      const [pending, failed, processing, stuck] = await Promise.all([
+        client.assetDerivative.count({ where: { status: 'pending' } }),
+        client.assetDerivative.count({ where: { status: 'failed' } }),
+        client.assetDerivative.count({ where: { status: 'processing' } }),
+        client.assetDerivative.count({ where: {
+          status: 'processing',
+          OR: [{ processingLeaseExpiresAt: null }, { processingLeaseExpiresAt: { lte: now } }],
+        } }),
+      ]);
+      const backlog = pending + failed;
+      const status = !toolsAvailable ? 'error'
+        : !started || stuck > 0 || backlog >= config.derivativeBacklogWarning ? 'degraded'
+          : 'ok';
+      return {
+        status,
+        worker: started && !stopping ? 'running' : 'stopped',
+        ffmpeg: ffmpegAvailable ? 'ok' : 'error',
+        ffprobe: ffprobeAvailable ? 'ok' : 'error',
+        queue: { pending, failed, processing, stuck, backlog },
+      } as const;
+    },
+    recoverStaleJobs,
     async stop() {
       stopping = true;
+      started = false;
       if (timer) clearTimeout(timer);
       await active;
     },

@@ -21,6 +21,7 @@ import de.photosync.domain.model.MediaMetadata
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
+import java.io.IOException
 
 
 data class SyncMediaCandidate(
@@ -36,11 +37,22 @@ data class SyncMediaCandidate(
     val durationMillis: Long?,
 )
 
-class MediaStoreRepository(context: Context) {
+data class MediaScanResult(val complete: Boolean)
+
+interface MediaInventory {
+    suspend fun loadAlbums(): List<LocalAlbum>
+    suspend fun scanAlbum(
+        volumeName: String,
+        bucketId: String,
+        onBatch: suspend (List<SyncMediaCandidate>) -> Unit,
+    ): MediaScanResult
+}
+
+class MediaStoreRepository(context: Context) : MediaInventory {
     private val appContext = context.applicationContext
     private val resolver = appContext.contentResolver
 
-    suspend fun loadAlbums(): List<LocalAlbum> = withContext(Dispatchers.IO) {
+    override suspend fun loadAlbums(): List<LocalAlbum> = withContext(Dispatchers.IO) {
         val accumulator = AlbumAccumulator()
         externalVolumes().forEach { volume ->
             resolver.query(
@@ -73,12 +85,13 @@ class MediaStoreRepository(context: Context) {
         pagingSourceFactory = { MediaStorePagingSource(resolver, album) },
     ).flow
 
-    suspend fun scanAlbum(
+    override suspend fun scanAlbum(
         volumeName: String,
         bucketId: String,
         onBatch: suspend (List<SyncMediaCandidate>) -> Unit,
-    ) = withContext(Dispatchers.IO) {
-        resolver.query(
+    ): MediaScanResult = withContext(Dispatchers.IO) {
+        if (volumeName !in externalVolumes()) return@withContext MediaScanResult(complete = false)
+        val cursor = resolver.query(
             filesUri(volumeName),
             SYNC_PROJECTION,
             queryArgs(
@@ -88,7 +101,8 @@ class MediaStoreRepository(context: Context) {
                 offset = null,
             ),
             null,
-        )?.use { cursor ->
+        ) ?: throw IOException("MediaStore konnte nicht gelesen werden")
+        cursor.use {
             val columns = SyncColumns(cursor)
             val batch = ArrayList<SyncMediaCandidate>(SCAN_BATCH_SIZE)
             while (cursor.moveToNext()) {
@@ -115,6 +129,7 @@ class MediaStoreRepository(context: Context) {
             }
             if (batch.isNotEmpty()) onBatch(batch)
         }
+        MediaScanResult(complete = volumeName in externalVolumes())
     }
 
     private fun externalVolumes(): Set<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -295,4 +310,3 @@ private fun queryArgs(
     if (limit != null) putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
     if (offset != null) putInt(ContentResolver.QUERY_ARG_OFFSET, offset)
 }
-
