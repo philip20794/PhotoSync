@@ -66,9 +66,12 @@ class SettingsViewModel(private val repository: SettingsRepository) : ViewModel(
         )
     }
 
-    fun restoreBackup(album: PartnerAlbumDto) = action {
-        repository.restoreBackup(album)
-        transient.value = transient.value.copy(message = "Backup-Download gestartet.")
+    fun restoreBackups(albums: List<PartnerAlbumDto>) = action {
+        require(albums.isNotEmpty()) { "Wähle mindestens einen Backup-Ordner aus." }
+        for (album in albums) repository.restoreBackup(album)
+        transient.value = transient.value.copy(
+            message = if (albums.size == 1) "Backup-Download gestartet." else "${albums.size} Backup-Downloads gestartet.",
+        )
     }
 
     fun setAutoBackup(value: Boolean) = action { repository.setAutoBackup(value) }

@@ -27,6 +27,8 @@ import kotlin.coroutines.cancellation.CancellationException
 
 data class PartnerGalleryState(
     val albums: List<PartnerAlbumDto> = emptyList(),
+    val albumGridColumns: Int = 2,
+    val mediaGridColumns: Map<String, Int> = emptyMap(),
     val loading: Boolean = true,
     val error: String? = null,
     val cacheBytes: Long = 0,
@@ -94,6 +96,14 @@ class PartnerGalleryViewModel(
 
     fun retryOffline(albumId: String) {
         viewModelScope.launch { offline.retry(albumId) }
+    }
+
+    fun setAlbumGridColumns(columns: Int) {
+        mutableState.update { it.copy(albumGridColumns = columns.coerceIn(1, 4)) }
+    }
+
+    fun setMediaGridColumns(albumId: String, columns: Int) {
+        mutableState.update { it.copy(mediaGridColumns = it.mediaGridColumns + (albumId to columns.coerceIn(2, 7))) }
     }
 
     fun rotate(asset: AssetDto) { viewModelScope.launch { repository.rotate(asset.id) } }

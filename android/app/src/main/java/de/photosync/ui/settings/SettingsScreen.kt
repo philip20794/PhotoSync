@@ -3,6 +3,7 @@ package de.photosync.ui.settings
 import android.Manifest
 import android.content.Context
 import android.os.Build
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,17 +11,21 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -66,7 +71,7 @@ fun SettingsScreen(context: Context, baseUrl: String, userId: String) {
         deviceName = deviceName,
         onDisplayNameChange = { displayName = it }, onDeviceNameChange = { deviceName = it },
         onSave = { model.saveProfile(displayName, deviceName) }, onWifiOnly = model::setWifiOnly,
-        onAutoBackup = model::setAutoBackup, onRestoreBackup = model::restoreBackup, onClearCache = model::clearCache,
+        onAutoBackup = model::setAutoBackup, onRestoreBackups = model::restoreBackups, onClearCache = model::clearCache,
         onNotifyErrors = { enabled ->
             if (enabled && Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             else model.setNotifyErrors(enabled)
@@ -82,10 +87,11 @@ internal fun SettingsContent(
     deviceName: String,
     onDisplayNameChange: (String) -> Unit = {}, onDeviceNameChange: (String) -> Unit = {}, onSave: () -> Unit = {},
     onWifiOnly: (Boolean) -> Unit = {}, onAutoBackup: (Boolean) -> Unit = {},
-    onRestoreBackup: (de.photosync.data.remote.PartnerAlbumDto) -> Unit = {},
+    onRestoreBackups: (List<de.photosync.data.remote.PartnerAlbumDto>) -> Unit = {},
     onClearCache: () -> Unit = {}, onNotifyErrors: (Boolean) -> Unit = {},
 ) {
     val preferences = state.preferences
+    var restoreSheetVisible by rememberSaveable { mutableStateOf(false) }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
         verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -112,33 +118,14 @@ internal fun SettingsContent(
             state.backupProgress?.let { BackupProgress(it) }
         }
 
-        SettingsCard("Backup wiederherstellen") {
-            if (state.backups.isEmpty()) {
-                Text(
-                    "Noch keine eigenen serverseitigen Backups vorhanden.",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                state.backups.forEach { album ->
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text(album.title, style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                "${album.assetCount} Medien · ${formatBytes(album.originalBytes)}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        OutlinedButton(
-                            onClick = { onRestoreBackup(album) },
-                            enabled = !state.working,
-                        ) { Text("Herunterladen") }
-                    }
-                }
+        SettingsCard("Backup") {
+            Text(
+                if (state.backups.isEmpty()) "Eigene serverseitige Backups auswählen und auf dieses Gerät laden."
+                else "${state.backups.size} eigene Backup-Ordner stehen zur Wiederherstellung bereit.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = { restoreSheetVisible = true }, enabled = !state.working) {
+                Text("Backup wiederherstellen")
             }
         }
 
@@ -163,6 +150,76 @@ internal fun SettingsContent(
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         if (state.working) CircularProgressIndicator()
         Spacer(Modifier.height(20.dp))
+    }
+    if (restoreSheetVisible) {
+        BackupRestoreSheet(
+            backups = state.backups,
+            working = state.working,
+            onDismiss = { restoreSheetVisible = false },
+            onRestore = {
+                restoreSheetVisible = false
+                onRestoreBackups(it)
+            },
+        )
+    }
+}
+
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+private fun BackupRestoreSheet(
+    backups: List<de.photosync.data.remote.PartnerAlbumDto>,
+    working: Boolean,
+    onDismiss: () -> Unit,
+    onRestore: (List<de.photosync.data.remote.PartnerAlbumDto>) -> Unit,
+) {
+    var selectedIds by remember(backups) { mutableStateOf(emptySet<String>()) }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Backup wiederherstellen", style = MaterialTheme.typography.titleLarge)
+            Text(
+                "Wähle einen oder mehrere Ordner aus. Die Originale werden im Hintergrund heruntergeladen.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (backups.isEmpty()) {
+                Text("Noch keine eigenen serverseitigen Backups vorhanden.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Column(Modifier.fillMaxWidth().heightIn(max = 360.dp).verticalScroll(rememberScrollState())) {
+                    backups.forEach { album ->
+                        val selected = album.id in selectedIds
+                        Row(
+                            Modifier.fillMaxWidth().clickable {
+                                selectedIds = if (selected) selectedIds - album.id else selectedIds + album.id
+                            }.padding(vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(
+                                checked = selected,
+                                onCheckedChange = { checked ->
+                                    selectedIds = if (checked) selectedIds + album.id else selectedIds - album.id
+                                },
+                            )
+                            Column(Modifier.weight(1f).padding(start = 8.dp)) {
+                                Text(album.title, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    "${album.assetCount} Medien · ${formatBytes(album.originalBytes)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    }
+                }
+                Button(
+                    onClick = { onRestore(backups.filter { it.id in selectedIds }) },
+                    enabled = !working && selectedIds.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Ausgewählte Ordner wiederherstellen") }
+            }
+            Spacer(Modifier.height(16.dp))
+        }
     }
 }
 

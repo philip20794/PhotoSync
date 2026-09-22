@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
@@ -59,6 +60,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
@@ -103,7 +105,9 @@ fun LocalGallery(applicationContext: Context, deviceId: String) {
                     album = album,
                     gallery = gallery,
                     progress = state.syncProgress[album.id],
+                    columns = state.mediaGridColumns[album.id] ?: 3,
                     onSharing = { gallery.setSharing(album, it) },
+                    onColumnsChanged = { gallery.setMediaGridColumns(album.id, it) },
                     onBack = { selectedAlbum = null },
                 )
             }
@@ -120,6 +124,8 @@ fun LocalGallery(applicationContext: Context, deviceId: String) {
             onRefresh = { gallery.refresh(true) },
             onAlbum = { selectedAlbum = it },
             onSharing = gallery::setSharing,
+            columns = state.albumGridColumns,
+            onColumnsChanged = gallery::setAlbumGridColumns,
         )
     }
 }
@@ -147,6 +153,8 @@ private fun AlbumGrid(
     onRefresh: () -> Unit,
     onAlbum: (LocalAlbum) -> Unit,
     onSharing: (LocalAlbum, Boolean) -> Unit,
+    columns: Int,
+    onColumnsChanged: (Int) -> Unit,
 ) {
     LocalAlbumOverview(
         state = state,
@@ -156,6 +164,8 @@ private fun AlbumGrid(
         onRefresh = onRefresh,
         onAlbum = onAlbum,
         onSharing = onSharing,
+        gridColumns = columns,
+        onGridColumnsChanged = onColumnsChanged,
     )
 }
 
@@ -171,8 +181,11 @@ internal fun LocalAlbumOverview(
     onRefresh: () -> Unit = {},
     onAlbum: (LocalAlbum) -> Unit = {},
     onSharing: (LocalAlbum, Boolean) -> Unit = { _, _ -> },
+    gridColumns: Int? = null,
+    onGridColumnsChanged: (Int) -> Unit = {},
 ) {
-    var columns by rememberSaveable { mutableIntStateOf(initialColumns.coerceIn(1, 4)) }
+    var previewColumns by rememberSaveable { mutableIntStateOf(initialColumns.coerceIn(1, 4)) }
+    val columns = gridColumns ?: previewColumns
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     Scaffold(
         modifier = if (showTopBar) {
@@ -208,7 +221,9 @@ internal fun LocalAlbumOverview(
             state.albums.isEmpty() -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { Text("Keine zugänglichen lokalen Alben gefunden.") }
             else -> LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
-                modifier = Modifier.fillMaxSize().pinchToResizeGrid(columns, 1, 4) { columns = it },
+                modifier = Modifier.fillMaxSize().pinchToResizeGrid(columns, 1, 4) {
+                    if (gridColumns == null) previewColumns = it else onGridColumnsChanged(it)
+                },
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = padding.calculateTopPadding() + 8.dp, bottom = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(if (columns >= 3) 4.dp else 12.dp),
                 verticalArrangement = Arrangement.spacedBy(if (columns >= 3) 8.dp else 16.dp),
@@ -221,6 +236,7 @@ internal fun LocalAlbumOverview(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AlbumCard(
     album: LocalAlbum,
@@ -229,18 +245,32 @@ private fun AlbumCard(
     onSharing: (Boolean) -> Unit,
     compact: Boolean,
 ) {
-    Card(
-        Modifier.fillMaxWidth().clickable { onAlbum(album) },
+    var actionMenuVisible by remember(album.id) { mutableStateOf(false) }
+    Box {
+        Card(
+        Modifier.fillMaxWidth().combinedClickable(
+            onClick = { onAlbum(album) },
+            onLongClick = { actionMenuVisible = true },
+        ),
         shape = MaterialTheme.shapes.large,
         elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
     ) {
-        AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current).data(album.coverUri).build(),
-            contentDescription = "Cover von ${album.name}",
-            modifier = Modifier.fillMaxWidth().aspectRatio(4f / 3f).background(MaterialTheme.colorScheme.surfaceVariant),
-            contentScale = ContentScale.Crop,
-            filterQuality = FilterQuality.Low,
-        )
+        Box(Modifier.fillMaxWidth().aspectRatio(4f / 3f).background(MaterialTheme.colorScheme.surfaceVariant)) {
+            AsyncImage(
+                model = ImageRequest.Builder(LocalContext.current).data(album.coverUri).build(),
+                contentDescription = "Cover von ${album.name}",
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+                filterQuality = FilterQuality.Low,
+            )
+            if (progress?.shareRequested == true) {
+                Surface(
+                    modifier = Modifier.align(Alignment.TopEnd).padding(8.dp),
+                    shape = MaterialTheme.shapes.small,
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.92f),
+                ) { Text("Geteilt", modifier = Modifier.padding(horizontal = 7.dp, vertical = 4.dp), style = MaterialTheme.typography.labelSmall) }
+            }
+        }
         Column(Modifier.padding(if (compact) 8.dp else 14.dp), verticalArrangement = Arrangement.spacedBy(if (compact) 3.dp else 7.dp)) {
             Text(album.name, style = MaterialTheme.typography.titleMedium, maxLines = 1)
             Text("${album.imageCount} Fotos · ${album.videoCount} Videos", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
@@ -252,9 +282,15 @@ private fun AlbumCard(
                     }
                     Switch(checked = progress?.shareRequested == true, onCheckedChange = onSharing)
                 }
-            } else if (progress?.shareRequested == true) {
-                Text("Geteilt", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             }
+        }
+    }
+        DropdownMenu(expanded = actionMenuVisible, onDismissRequest = { actionMenuVisible = false }) {
+            val shared = progress?.shareRequested == true
+            DropdownMenuItem(
+                text = { Text(if (shared) "Freigabe beenden" else "Mit Partner teilen") },
+                onClick = { actionMenuVisible = false; onSharing(!shared) },
+            )
         }
     }
 }
@@ -265,12 +301,13 @@ private fun AlbumMediaGrid(
     album: LocalAlbum,
     gallery: GalleryViewModel,
     progress: AlbumSyncProgress?,
+    columns: Int,
     onSharing: (Boolean) -> Unit,
+    onColumnsChanged: (Int) -> Unit,
     onBack: () -> Unit,
 ) {
     val flow = remember(album.id) { gallery.media(album) }
     val media = flow.collectAsLazyPagingItems()
-    var columns by rememberSaveable(album.id) { mutableIntStateOf(3) }
     var selectedMedia by remember(album.id) { mutableStateOf<LocalMedia?>(null) }
     selectedMedia?.let { selected ->
         BackHandler { selectedMedia = null }
@@ -290,7 +327,7 @@ private fun AlbumMediaGrid(
             }
             is LoadState.NotLoading -> LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
-                modifier = Modifier.fillMaxSize().pinchToResizeGrid(columns, 2, 7) { columns = it },
+                modifier = Modifier.fillMaxSize().pinchToResizeGrid(columns, 2, 7, onColumnsChanged),
                 contentPadding = PaddingValues(start = 2.dp, end = 2.dp, top = padding.calculateTopPadding() + 2.dp, bottom = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(3.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),

@@ -104,7 +104,18 @@ fun PartnerGallery(applicationContext: Context, baseUrl: String, userId: String)
             properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
         ) {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                Box(Modifier.fillMaxSize()) { AlbumGrid(selected, gallery, { album = null }, { asset = it }, { actionAsset = it }); actionAsset?.let { PartnerImageActions(it, gallery) { actionAsset = null } } }
+                Box(Modifier.fillMaxSize()) {
+                    AlbumGrid(
+                        selected,
+                        gallery,
+                        state.mediaGridColumns[selected.id] ?: 3,
+                        { gallery.setMediaGridColumns(selected.id, it) },
+                        { album = null },
+                        { asset = it },
+                        { actionAsset = it },
+                    )
+                    actionAsset?.let { PartnerImageActions(it, gallery) { actionAsset = null } }
+                }
             }
         }
         return
@@ -121,6 +132,8 @@ private fun AlbumOverview(state: PartnerGalleryState, gallery: PartnerGalleryVie
         onAlbum = onAlbum,
         onSetOffline = gallery::setAlbumOffline,
         onRetryOffline = gallery::retryOffline,
+        gridColumns = state.albumGridColumns,
+        onGridColumnsChanged = gallery::setAlbumGridColumns,
         cover = { album -> album.cover?.let { Cover(it.assetId, it.version, it.sha256, gallery) } },
     )
 }
@@ -136,8 +149,11 @@ internal fun PartnerAlbumOverviewContent(
     onAlbum: (PartnerAlbumDto) -> Unit = {}, onSetOffline: (PartnerAlbumDto, String) -> Unit = { _, _ -> },
     onRetryOffline: (String) -> Unit = {},
     cover: @Composable (PartnerAlbumDto) -> Unit = {},
+    gridColumns: Int? = null,
+    onGridColumnsChanged: (Int) -> Unit = {},
 ) {
-    var columns by rememberSaveable { mutableIntStateOf(initialColumns.coerceIn(1, 4)) }
+    var previewColumns by rememberSaveable { mutableIntStateOf(initialColumns.coerceIn(1, 4)) }
+    val columns = gridColumns ?: previewColumns
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     Scaffold(
         modifier = if (showTopBar) {
@@ -165,7 +181,9 @@ internal fun PartnerAlbumOverviewContent(
             state.albums.isEmpty() && state.error == null -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { Text("Der Partner hat noch keine freigegebenen Alben.") }
             else -> LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
-                modifier = Modifier.fillMaxSize().pinchToResizeGrid(columns, 1, 4) { columns = it },
+                modifier = Modifier.fillMaxSize().pinchToResizeGrid(columns, 1, 4) {
+                    if (gridColumns == null) previewColumns = it else onGridColumnsChanged(it)
+                },
                 contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = padding.calculateTopPadding() + 8.dp, bottom = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(if (columns >= 3) 4.dp else 12.dp),
                 verticalArrangement = Arrangement.spacedBy(if (columns >= 3) 8.dp else 16.dp),
@@ -232,9 +250,16 @@ private fun Cover(id: String, version: String, sha256: String?, gallery: Partner
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AlbumGrid(album: PartnerAlbumDto, gallery: PartnerGalleryViewModel, back: () -> Unit, select: (AssetDto) -> Unit, actions: (AssetDto) -> Unit) {
+private fun AlbumGrid(
+    album: PartnerAlbumDto,
+    gallery: PartnerGalleryViewModel,
+    columns: Int,
+    onColumnsChanged: (Int) -> Unit,
+    back: () -> Unit,
+    select: (AssetDto) -> Unit,
+    actions: (AssetDto) -> Unit,
+) {
     val assets = remember(album.id) { gallery.assets(album) }.collectAsLazyPagingItems()
-    var columns by rememberSaveable(album.id) { mutableIntStateOf(3) }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     Scaffold(
         modifier = Modifier.fillMaxSize().nestedScroll(scrollBehavior.nestedScrollConnection),
@@ -245,7 +270,7 @@ private fun AlbumGrid(album: PartnerAlbumDto, gallery: PartnerGalleryViewModel, 
             is LoadState.Error -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) { Button(onClick = assets::retry) { Text("Erneut versuchen") } }
             is LoadState.NotLoading -> LazyVerticalGrid(
                 columns = GridCells.Fixed(columns),
-                modifier = Modifier.fillMaxSize().pinchToResizeGrid(columns, 2, 7) { columns = it },
+                modifier = Modifier.fillMaxSize().pinchToResizeGrid(columns, 2, 7, onColumnsChanged),
                 contentPadding = PaddingValues(start = 2.dp, end = 2.dp, top = padding.calculateTopPadding() + 2.dp, bottom = 2.dp),
                 horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
