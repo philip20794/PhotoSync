@@ -8,6 +8,7 @@ import de.photosync.data.SettingsRepository
 import de.photosync.data.local.AppDatabase
 import de.photosync.data.local.SecureCredentialStore
 import de.photosync.data.local.SyncSettingsEntity
+import de.photosync.data.BackupProgressUi
 import de.photosync.data.remote.PartnerAlbumDto
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +24,7 @@ data class SettingsUiState(
     val partnerName: String? = null,
     val backups: List<PartnerAlbumDto> = emptyList(),
     val offlineBytes: Long = 0,
+    val backupProgress: BackupProgressUi? = null,
     val cacheBytes: Long = 0,
     val cacheMaxBytes: Long = 0,
     val working: Boolean = false,
@@ -33,7 +35,7 @@ data class SettingsUiState(
 class SettingsViewModel(private val repository: SettingsRepository) : ViewModel() {
     private val transient = MutableStateFlow(SettingsUiState(cacheMaxBytes = repository.cacheMaxBytes))
     val state = combine(repository.settings, transient) { saved, ui ->
-        ui.copy(preferences = saved.preferences, offlineBytes = saved.offlineBytes)
+        ui.copy(preferences = saved.preferences, offlineBytes = saved.offlineBytes, backupProgress = saved.backupProgress)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), transient.value)
 
     init {

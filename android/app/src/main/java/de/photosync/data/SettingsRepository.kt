@@ -1,10 +1,14 @@
 package de.photosync.data
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import de.photosync.data.local.AppDatabase
 import de.photosync.data.local.DeviceSessionEntity
 import de.photosync.data.local.SecureCredentialStore
 import de.photosync.data.local.SyncSettingsEntity
+import de.photosync.data.local.BackupTransferProgress
 import de.photosync.data.offline.PartnerOfflineRepository
 import de.photosync.data.remote.RetrofitFactory
 import de.photosync.data.remote.PartnerAlbumDto
@@ -14,12 +18,31 @@ import de.photosync.data.sync.remoteScope
 import de.photosync.ui.partner.PartnerMediaCache
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.channels.awaitClose
+
+data class BackupProgressUi(val indeterminate: Boolean, val percent: Int? = null, val status: String, val isError: Boolean = false)
 
 data class SettingsSnapshot(
     val preferences: SyncSettingsEntity,
     val offlineBytes: Long,
+    val backupProgress: BackupProgressUi? = null,
 )
 
+internal fun backupProgressUi(raw: BackupTransferProgress, wifiOnly: Boolean, wifiAvailable: Boolean): BackupProgressUi {
+    if (raw.albumCount == 0L || raw.scannedAlbumCount < raw.albumCount) return BackupProgressUi(true, status = "Backup wird vorbereitet")
+    raw.failureMessage?.let { return BackupProgressUi(false, status = "Backup braucht Aufmerksamkeit", isError = true) }
+    if (raw.totalBytes == 0L || raw.securedBytes >= raw.totalBytes) return BackupProgressUi(false, percent = 100, status = "Backup vollständig")
+    if (wifiOnly && !wifiAvailable) return BackupProgressUi(false, status = "Wartet auf WLAN")
+    val visibleBytes = raw.transferBytes.coerceIn(raw.securedBytes, raw.totalBytes)
+    val percent = ((visibleBytes * 100) / raw.totalBytes).toInt().coerceIn(0, 99)
+    return BackupProgressUi(false, percent = percent, status = "$percent % gesichert")
+}
+
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SettingsRepository(
     context: Context,
     private val database: AppDatabase,
@@ -32,10 +55,20 @@ class SettingsRepository(
     private val cache = PartnerMediaCache.get(appContext, credentials)
     private val api = RetrofitFactory.create(baseUrl, credentials)
 
+    private val backupTransfers = database.appStateDao().observeSession().flatMapLatest { session ->
+        if (session == null) flowOf(BackupTransferProgress(0, 0, 0, 0, 0, null))
+        else database.syncDao().observeBackupProgress(session.deviceId)
+    }
+
     val settings: Flow<SettingsSnapshot> = combine(
         database.settingsDao().observe(scope),
         database.offlineDao().observeStoredBytes(scope),
-    ) { value, bytes -> SettingsSnapshot(value ?: SyncSettingsEntity(scope), bytes) }
+        backupTransfers,
+        wifiAvailability(appContext),
+    ) { value, bytes, transfers, wifiAvailable ->
+        val preferences = value ?: SyncSettingsEntity(scope)
+        SettingsSnapshot(preferences, bytes, if (preferences.autoBackupEnabled) backupProgressUi(transfers, preferences.wifiOnly, wifiAvailable) else null)
+    }
 
     val cacheMaxBytes: Long get() = cache.maxBytes
 
@@ -103,3 +136,19 @@ class SettingsRepository(
         ))
     }
 }
+
+private fun wifiAvailability(context: Context): Flow<Boolean> = callbackFlow {
+    val manager = context.getSystemService(ConnectivityManager::class.java)
+    fun available(): Boolean {
+        val capabilities = manager.getNetworkCapabilities(manager.activeNetwork) ?: return false
+        return capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+    }
+    trySend(available())
+    val callback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) { trySend(available()) }
+        override fun onLost(network: Network) { trySend(available()) }
+        override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) { trySend(available()) }
+    }
+    manager.registerDefaultNetworkCallback(callback)
+    awaitClose { manager.unregisterNetworkCallback(callback) }
+}.distinctUntilChanged()

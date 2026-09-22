@@ -19,6 +19,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.coroutines.cancellation.CancellationException
@@ -40,6 +42,8 @@ class PartnerGalleryViewModel(
         PartnerGalleryState(cacheMaxBytes = repository.cacheMaxBytes),
     )
     val state: StateFlow<PartnerGalleryState> = mutableState.asStateFlow()
+    private val mutableShare = MutableSharedFlow<PartnerShareEvent>()
+    val share = mutableShare.asSharedFlow()
 
     init {
         refresh()
@@ -92,6 +96,13 @@ class PartnerGalleryViewModel(
         viewModelScope.launch { offline.retry(albumId) }
     }
 
+    fun rotate(asset: AssetDto) { viewModelScope.launch { repository.rotate(asset.id) } }
+    fun rotation(assetId: String): Flow<Int?> = repository.rotation(assetId)
+    fun share(asset: AssetDto) { viewModelScope.launch {
+        runCatching { repository.originalForShare(asset) }.onSuccess { mutableShare.emit(PartnerShareEvent.Ready(it, asset.mimeType)) }
+            .onFailure { mutableShare.emit(PartnerShareEvent.Error("Original konnte nicht geteilt werden.")) }
+    } }
+
     fun offlineAsset(assetId: String): Flow<OfflineAssetEntity?> = offline.asset(assetId)
 
     fun clearCache() {
@@ -132,4 +143,9 @@ class PartnerGalleryViewModel(
             }
         }
     }
+}
+
+sealed interface PartnerShareEvent {
+    data class Ready(val file: File, val mimeType: String) : PartnerShareEvent
+    data class Error(val message: String) : PartnerShareEvent
 }

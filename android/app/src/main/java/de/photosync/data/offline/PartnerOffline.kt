@@ -194,8 +194,10 @@ class PartnerOfflineRepository(
         require(variant == OfflineMode.OPTIMIZED || variant == OfflineMode.ORIGINAL)
         val descriptor = asset.offlineDescriptor(variant) ?: error("Variante ist noch nicht verfügbar")
         val dao = database.offlineDao()
-        require(dao.album(scope, asset.albumId)?.desiredMode in setOf(OfflineMode.OPTIMIZED, OfflineMode.ORIGINAL))
         database.withTransaction {
+        if (dao.album(scope, asset.albumId) == null) {
+            dao.saveAlbum(OfflineAlbumEntity(scope = scope, albumId = asset.albumId, desiredMode = OfflineMode.NONE, status = OfflineStatus.PENDING, updatedAt = System.currentTimeMillis()))
+        }
         val existing = dao.asset(scope, asset.id)
         if (existing == null) {
             dao.saveAsset(OfflineAssetEntity(
@@ -243,7 +245,7 @@ class PartnerOfflineWorker(context: Context, params: WorkerParameters) : Corouti
         root.mkdirs()
         dao.recoverAlbum(scope, albumId)
         val album = dao.album(scope, albumId) ?: return Result.success()
-        if (album.desiredMode == OfflineMode.NONE) {
+        if (album.desiredMode == OfflineMode.NONE && dao.assets(scope, albumId).none { it.overridesAlbumMode }) {
             val failed = dao.assets(scope, albumId).any { !deleteAssetFiles(albumId, it) }
             val albumDir = File(root, albumId)
             val directoryDeleted = deleteTreeTracked(albumDir)
@@ -342,6 +344,7 @@ class PartnerOfflineWorker(context: Context, params: WorkerParameters) : Corouti
 
     private suspend fun reconcile(api: PhotoSyncApi, album: OfflineAlbumEntity, asset: AssetDto) {
         val current = dao.asset(album.scope, asset.id)
+        if (current == null && album.desiredMode == OfflineMode.NONE) return
         val desired = desiredOfflineVariant(album, current)
         val descriptor = asset.offlineDescriptor(desired) ?: throw IOException("Variante ist noch nicht verfügbar")
         val target = targetFile(album.albumId, asset.id, descriptor)

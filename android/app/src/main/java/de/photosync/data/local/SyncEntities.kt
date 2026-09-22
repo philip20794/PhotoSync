@@ -81,6 +81,15 @@ object UploadStatus {
     const val DELETED = "deleted"
 }
 
+data class BackupTransferProgress(
+    val albumCount: Long,
+    val scannedAlbumCount: Long,
+    val totalBytes: Long,
+    val securedBytes: Long,
+    val transferBytes: Long,
+    val failureMessage: String?,
+)
+
 data class AlbumSyncProgress(
     val localAlbumId: String,
     val mediaStoreAlbumId: String,
@@ -384,6 +393,20 @@ interface SyncDao {
         ORDER BY a.localAlbumId
     """)
     fun observeProgress(deviceId: String): Flow<List<AlbumSyncProgress>>
+
+    @Query("""
+        SELECT COUNT(DISTINCT a.localAlbumId) AS albumCount,
+               COUNT(DISTINCT CASE WHEN a.lastScanAt IS NOT NULL THEN a.localAlbumId END) AS scannedAlbumCount,
+               COALESCE(SUM(q.fileSize), 0) AS totalBytes,
+               COALESCE(SUM(CASE WHEN q.status = 'complete' AND q.serverAssetId IS NOT NULL THEN q.fileSize ELSE 0 END), 0) AS securedBytes,
+               COALESCE(SUM(CASE WHEN q.status = 'complete' AND q.serverAssetId IS NOT NULL THEN q.fileSize ELSE MIN(q.uploadedBytes, q.fileSize) END), 0) AS transferBytes,
+               MIN(CASE WHEN q.status = 'failed' THEN q.lastError END) AS failureMessage
+        FROM shared_albums a
+        LEFT JOIN upload_queue q ON q.localAlbumId = a.localAlbumId
+            AND q.status NOT IN ('deleted', 'abandoned', 'delete_pending', 'replacement_delete_pending', 'cancel_pending', 'replacement_cancel_pending')
+        WHERE a.sourceDeviceId = :deviceId AND a.backupRequested = 1
+    """)
+    fun observeBackupProgress(deviceId: String): Flow<BackupTransferProgress>
 }
 
 

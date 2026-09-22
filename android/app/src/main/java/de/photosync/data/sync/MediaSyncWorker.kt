@@ -12,7 +12,10 @@ import java.io.File
 
 class MediaSyncWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
-        val lock = WorkerLock.tryAcquire(File(applicationContext.filesDir, "sync.lock")) ?: return Result.success()
+        // A concurrent local inventory may have just filled the persistent upload
+        // queue. Retrying instead of reporting success resumes the transfer as
+        // soon as that inventory releases the shared lock.
+        val lock = WorkerLock.tryAcquire(File(applicationContext.filesDir, "sync.lock")) ?: return Result.retry()
         return lock.use { runLocked() }
     }
 

@@ -18,6 +18,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -108,6 +109,7 @@ internal fun SettingsContent(
         SettingsCard("Synchronisierung") {
             SettingSwitch("Nur über WLAN", "Schont dein mobiles Datenvolumen", preferences?.wifiOnly == true, state.working, onWifiOnly)
             SettingSwitch("Automatisch sichern", "Neue Fotos privat auf deinem Server sichern", preferences?.autoBackupEnabled == true, state.working, onAutoBackup)
+            state.backupProgress?.let { BackupProgress(it) }
         }
 
         SettingsCard("Backup wiederherstellen") {
@@ -196,4 +198,14 @@ private fun formatBytes(value: String): String {
     val bytes = value.toLongOrNull() ?: return "Größe unbekannt"
     val mebibytes = bytes / (1024.0 * 1024.0)
     return if (mebibytes < 1024) "%.1f MiB".format(mebibytes) else "%.1f GiB".format(mebibytes / 1024.0)
+}
+
+@Composable
+private fun BackupProgress(progress: de.photosync.data.BackupProgressUi) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (progress.indeterminate) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        else LinearProgressIndicator(progress = { (progress.percent ?: 0).toFloat() / 100f }, modifier = Modifier.fillMaxWidth())
+        Text(progress.status, style = MaterialTheme.typography.bodySmall,
+            color = if (progress.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }

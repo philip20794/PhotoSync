@@ -1,10 +1,13 @@
 package de.photosync.ui.partner
 
 import android.content.Context
+import android.content.Intent
+import androidx.core.content.FileProvider
 import android.graphics.Color
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.Arrangement
@@ -29,6 +32,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -72,6 +76,7 @@ import de.photosync.data.offline.OfflineStatus
 import de.photosync.data.offline.OfflineAssetEntity
 import de.photosync.ui.gallery.pinchToResizeGrid
 import java.io.File
+import kotlinx.coroutines.flow.collect
 
 @Composable
 fun PartnerGallery(applicationContext: Context, baseUrl: String, userId: String) {
@@ -79,6 +84,11 @@ fun PartnerGallery(applicationContext: Context, baseUrl: String, userId: String)
     val state by gallery.state.collectAsStateWithLifecycle()
     var album by remember { mutableStateOf<PartnerAlbumDto?>(null) }
     var asset by remember { mutableStateOf<AssetDto?>(null) }
+    var actionAsset by remember { mutableStateOf<AssetDto?>(null) }
+    LaunchedEffect(gallery) { gallery.share.collect { event -> if (event is PartnerShareEvent.Ready) {
+        val uri = FileProvider.getUriForFile(applicationContext, applicationContext.packageName + ".files", event.file)
+        applicationContext.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = event.mimeType; putExtra(Intent.EXTRA_STREAM, uri); addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION) }, "Bild teilen").addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+    } } }
     asset?.let { selected ->
         Dialog(
             onDismissRequest = { asset = null },
@@ -94,7 +104,7 @@ fun PartnerGallery(applicationContext: Context, baseUrl: String, userId: String)
             properties = DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
         ) {
             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                AlbumGrid(selected, gallery, { album = null }) { asset = it }
+                Box(Modifier.fillMaxSize()) { AlbumGrid(selected, gallery, { album = null }, { asset = it }, { actionAsset = it }); actionAsset?.let { PartnerImageActions(it, gallery) { actionAsset = null } } }
             }
         }
         return
@@ -222,7 +232,7 @@ private fun Cover(id: String, version: String, sha256: String?, gallery: Partner
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun AlbumGrid(album: PartnerAlbumDto, gallery: PartnerGalleryViewModel, back: () -> Unit, select: (AssetDto) -> Unit) {
+private fun AlbumGrid(album: PartnerAlbumDto, gallery: PartnerGalleryViewModel, back: () -> Unit, select: (AssetDto) -> Unit, actions: (AssetDto) -> Unit) {
     val assets = remember(album.id) { gallery.assets(album) }.collectAsLazyPagingItems()
     var columns by rememberSaveable(album.id) { mutableIntStateOf(3) }
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
@@ -240,7 +250,7 @@ private fun AlbumGrid(album: PartnerAlbumDto, gallery: PartnerGalleryViewModel, 
                 horizontalArrangement = Arrangement.spacedBy(3.dp), verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 items(count = assets.itemCount, key = { index -> assets.peek(index)?.id ?: index }) { index ->
-                    assets[index]?.let { entry -> PartnerAssetTile(entry, { select(entry) }) { AssetThumbnail(entry, gallery) } }
+                    assets[index]?.let { entry -> PartnerAssetTile(entry, { select(entry) }, { actions(entry) }) { AssetThumbnail(entry, gallery) } }
                 }
                 if (assets.loadState.append is LoadState.Loading) item { Box(Modifier.aspectRatio(1f), contentAlignment = Alignment.Center) { CircularProgressIndicator() } }
                 if (assets.loadState.append is LoadState.Error) item { TextButton(onClick = assets::retry) { Text("Mehr laden") } }
@@ -320,8 +330,8 @@ internal fun PartnerAssetViewerContent(
 }
 
 @Composable
-private fun PartnerAssetTile(asset: AssetDto, click: () -> Unit, thumbnail: @Composable () -> Unit) {
-    Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(MaterialTheme.shapes.extraSmall).background(MaterialTheme.colorScheme.surfaceVariant).clickable(onClick = click), contentAlignment = Alignment.Center) {
+private fun PartnerAssetTile(asset: AssetDto, click: () -> Unit, longClick: () -> Unit = {}, thumbnail: @Composable () -> Unit) {
+    Box(Modifier.fillMaxWidth().aspectRatio(1f).clip(MaterialTheme.shapes.extraSmall).background(MaterialTheme.colorScheme.surfaceVariant).combinedClickable(onClick = click, onLongClick = { if (asset.mimeType.startsWith("image/")) longClick() }), contentAlignment = Alignment.Center) {
         thumbnail()
         if (asset.mimeType.startsWith("video/")) Surface(modifier = Modifier.align(Alignment.BottomEnd).padding(4.dp), color = MaterialTheme.colorScheme.scrim.copy(alpha = .65f)) {
             Text(asset.durationMillis?.let(::duration) ?: "VIDEO", modifier = Modifier.padding(horizontal = 6.dp, vertical = 3.dp), color = MaterialTheme.colorScheme.inverseOnSurface)
@@ -335,7 +345,8 @@ private fun AssetThumbnail(asset: AssetDto, gallery: PartnerGalleryViewModel, mo
     var file by remember(asset.id, asset.derivatives) { mutableStateOf<File?>(null) }
     LaunchedEffect(asset.id, asset.derivatives) { file = runCatching { gallery.thumbnail(asset) }.getOrNull() }
     val durable = offline?.takeIf { it.status == OfflineStatus.READY }?.localPath?.let(::File)?.takeIf(File::isFile)
-    (durable ?: file)?.let { image -> AsyncImage(image, asset.originalFileName, modifier.fillMaxSize(), contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low) }
+    val rotation by remember(asset.id) { gallery.rotation(asset.id) }.collectAsStateWithLifecycle(initialValue = 0)
+    (durable ?: file)?.let { image -> AsyncImage(image, asset.originalFileName, modifier.fillMaxSize().graphicsLayer(rotationZ = (rotation ?: 0).toFloat()), contentScale = ContentScale.Crop, filterQuality = FilterQuality.Low) }
 }
 
 @Composable
@@ -352,6 +363,7 @@ private fun AssetViewer(asset: AssetDto, gallery: PartnerGalleryViewModel, back:
 
 @Composable
 private fun Photo(asset: AssetDto, gallery: PartnerGalleryViewModel, offline: OfflineAssetEntity?) {
+    val rotation by remember(asset.id) { gallery.rotation(asset.id) }.collectAsStateWithLifecycle(initialValue = 0)
     var thumb by remember(asset.id, asset.derivatives) { mutableStateOf<File?>(null) }
     var optimized by remember(asset.id, asset.derivatives) { mutableStateOf<File?>(null) }
     LaunchedEffect(asset.id, asset.derivatives) {
@@ -362,7 +374,7 @@ private fun Photo(asset: AssetDto, gallery: PartnerGalleryViewModel, offline: Of
     val transform = rememberTransformableState { zoom, _, _ -> scale = (scale * zoom).coerceIn(1f, 6f) }
     Box(Modifier.fillMaxSize().background(ComposeColor.Black), contentAlignment = Alignment.Center) {
         val durable = offline?.takeIf { it.status == OfflineStatus.READY }?.localPath?.let(::File)?.takeIf(File::isFile)
-        AsyncImage(durable ?: optimized ?: thumb, asset.originalFileName, Modifier.fillMaxSize().transformable(transform).graphicsLayer(scaleX = scale, scaleY = scale), contentScale = ContentScale.Fit)
+        AsyncImage(durable ?: optimized ?: thumb, asset.originalFileName, Modifier.fillMaxSize().transformable(transform).graphicsLayer(scaleX = scale, scaleY = scale, rotationZ = (rotation ?: 0).toFloat()), contentScale = ContentScale.Fit)
         if (thumb == null) CircularProgressIndicator()
     }
 }
@@ -395,4 +407,18 @@ private fun offlineStatusText(status: String?): String? = when (status) {
     OfflineStatus.FAILED -> "Download nicht abgeschlossen"
     OfflineStatus.READY -> "Offline verfügbar"
     else -> null
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PartnerImageActions(asset: AssetDto, gallery: PartnerGalleryViewModel, dismiss: () -> Unit) {
+    ModalBottomSheet(onDismissRequest = dismiss) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+            Text(asset.originalFileName, modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp), style = MaterialTheme.typography.titleMedium, maxLines = 1)
+            TextButton(onClick = { gallery.setAssetOffline(asset, OfflineMode.ORIGINAL); dismiss() }, modifier = Modifier.fillMaxWidth()) { Text("Original herunterladen", modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) }
+            TextButton(onClick = { gallery.setAssetOffline(asset, OfflineMode.OPTIMIZED); dismiss() }, modifier = Modifier.fillMaxWidth()) { Text("Offline speichern", modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) }
+            TextButton(onClick = { gallery.rotate(asset); dismiss() }, modifier = Modifier.fillMaxWidth()) { Text("Drehen", modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) }
+            TextButton(onClick = { gallery.share(asset); dismiss() }, modifier = Modifier.fillMaxWidth()) { Text("Teilen", modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)) }
+        }
+    }
 }
