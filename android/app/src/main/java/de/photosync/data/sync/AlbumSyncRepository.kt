@@ -32,6 +32,7 @@ class AlbumSyncRepository(
                     mediaStoreAlbumId = album.id,
                     sourceDeviceId = deviceId,
                     volumeName = album.volumeName,
+                    relativePath = album.relativePath,
                     bucketId = album.bucketId,
                     title = album.name,
                 ),

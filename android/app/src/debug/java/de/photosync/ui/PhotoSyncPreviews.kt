@@ -39,7 +39,7 @@ import de.photosync.ui.trash.TrashState
 /** Debug-only fixtures: no server, MediaStore, credentials, or image downloads are used by previews. */
 private object PreviewFixtures {
     private const val timestamp = "2026-09-21T10:30:00Z"
-    private val owner = UserDto("partner-1", "Mara")
+    private val owner = UserDto("partner-1", "Mara", "mara")
     val localAlbums = listOf(
         LocalAlbum("camera", "external_primary", "42", "Kamera", "content://preview/camera", 842, 61),
         LocalAlbum("holiday", "external_primary", "7", "Sommerurlaub an der Atlantikküste 2026 – unbearbeitet", "content://preview/holiday", 126, 18),
@@ -63,12 +63,6 @@ private object PreviewFixtures {
 }
 
 @Composable private fun PreviewTheme(content: @Composable () -> Unit) = PhotoSyncTheme(content)
-
-@Preview(name = "Ersteinrichtung", showBackground = true)
-@Composable fun SetupPreview() = PreviewTheme { SetupFormContent("setup_9QF2", "Phil", "Pixel 9", true) }
-
-@Preview(name = "Pairing", showBackground = true)
-@Composable fun PairingPreview() = PreviewTheme { PairingFormContent("H7K2-PQ4M", "Mara", "Galaxy S25", true) }
 
 @Preview(name = "Meine Alben", showBackground = true, widthDp = 420, heightDp = 840)
 @Composable fun MyAlbumsPreview() = PreviewTheme { LocalAlbumOverview(GalleryUiState(PreviewFixtures.localAlbums, mapOf("camera" to PreviewFixtures.localProgress)), partialAccess = true) }
@@ -125,7 +119,12 @@ private object PreviewFixtures {
 @Preview(name = "Einstellungen", showBackground = true, widthDp = 420, heightDp = 840)
 @Composable fun SettingsPreview() = PreviewTheme {
     SettingsContent(
-        state = SettingsUiState(SyncSettingsEntity("preview", autoBackupEnabled = true, wifiOnly = true, notifySyncErrors = true, lastSuccessfulSyncAt = 1_790_000_000_000, serverReachable = true), "Phil", "Pixel 9", "Mara", 8_456_000_000, 786_432_000, 2_147_483_648),
+        state = SettingsUiState(
+            preferences = SyncSettingsEntity("preview", autoBackupEnabled = true, wifiOnly = true, notifySyncErrors = true, lastSuccessfulSyncAt = 1_790_000_000_000, serverReachable = true),
+            displayName = "Phil", deviceName = "Pixel 9", partnerName = "Mara",
+            backups = PreviewFixtures.partnerAlbums, offlineBytes = 8_456_000_000,
+            cacheBytes = 786_432_000, cacheMaxBytes = 2_147_483_648,
+        ),
         displayName = "Phil", deviceName = "Pixel 9",
     )
 }

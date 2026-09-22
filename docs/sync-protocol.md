@@ -6,7 +6,7 @@ Stand 20.09.2026: MediaStore-Inventarisierung, persistente Upload-Queue, resumie
 
 `MediaStore → Kontrollscan → Room upload_queue → Metadaten-POST → Upload-Sitzung/Chunks → Backend ready → Derivat-Worker → Change-Feed → Room remote_work / remote_metadata → Partnergalerie / Offline-Auftrag`
 
-Die Galerie liest chronologisch paginierte Room-Metadaten. Feed-Verarbeitung lädt nur Metadaten, keine Thumbnail-, Optimized- oder Originalbytes. Binärdaten bleiben Lazy-Cache bzw. ausdrücklich gewählte dauerhafte Offline-Dateien.
+Die Galerie lädt chronologisch per Servercursor und ergänzt den persistierten Room-Metadatenabgleich; ein noch laufender Hintergrundabgleich begrenzt das Scrollen daher nicht auf seinen ersten Batch. Feed-Verarbeitung lädt nur Metadaten, keine Thumbnail-, Optimized- oder Originalbytes. Binärdaten bleiben Lazy-Cache bzw. ausdrücklich gewählte dauerhafte Offline-Dateien.
 
 ### Hintergrundauslöser und Grenzen
 
@@ -30,7 +30,7 @@ Das Journal hat eine konfigurierbare Retention (`SYNC_CHANGE_RETENTION_DAYS`, St
 
 ### Room-Commit und Wiederanlauf
 
-Room-Schema 8 trennt pro Server-URL und Nutzer den vollständig verarbeiteten cursor vom empfangenen pendingCursor und speichert zusätzlich Upload-Sitzungs-ID sowie bestätigten Byteoffset. Empfang einer Feed-Seite speichert Invalidationen in remote_work und pendingCursor atomar. Eine Albumaufgabe besitzt einen persistenten Metadaten-Seitencursor. Maximal 20 Aufgaben/Metadatenseiten werden pro Lauf verarbeitet.
+Room-Schema 9 speichert zusätzlich den normalisierten Album-RelativePath und übernimmt bei einer Neuinstallation Serveralbum-ID sowie Share-/Backup-Status. Room-Schema 8 trennt pro Server-URL und Nutzer den vollständig verarbeiteten cursor vom empfangenen pendingCursor und speichert zusätzlich Upload-Sitzungs-ID sowie bestätigten Byteoffset. Empfang einer Feed-Seite speichert Invalidationen in remote_work und pendingCursor atomar. Eine Albumaufgabe besitzt einen persistenten Metadaten-Seitencursor. Maximal 20 Aufgaben/Metadatenseiten werden pro Lauf verarbeitet.
 
 Jede erfolgreiche Metadatenseite wird zusammen mit ihrem Aufgabenfortschritt committed. Erst wenn alle Aufgaben abgeschlossen sind, wird pendingCursor zum vollständig verarbeiteten cursor. Ein Kill davor wiederholt höchstens bereits idempotent ausgeführte Arbeit. Eine unbekannte Ereignisart wird nicht stillschweigend bestätigt. 410 verwirft den betroffenen Cursor/Arbeitsstand und baut die Remote-Metadaten neu auf; lokale Uploadwünsche bleiben erhalten.
 
@@ -54,7 +54,7 @@ Referenzen: [FCM-Empfang und WorkManager](https://firebase.google.com/docs/cloud
 
 ## Implementierter Android-Zwischenstand
 
-Ein aktivierter Album-Schalter wird gerätebezogen in Room gespeichert. Ein eindeutiger WorkManager-Auftrag legt oder verknüpft das Serveralbum idempotent, inventarisiert MediaStore batchweise und fügt neue Content-URIs mit stabiler Geräte-/MediaStore-ID in `upload_queue` ein. Eine periodische Arbeit wiederholt die Inventarisierung mindestens im von Android erlaubten 15-Minuten-Raster.
+Ein aktivierter Album-Schalter wird lokal persistent gespeichert. Vor der Inventarisierung gleicht Android eigene Serveralben über Volume und normalisierten RelativePath ab. Dadurch werden Server-ID, Freigabe und Backup-Marker nach Neuinstallation übernommen. Der Server erzwingt UNIQUE(ownerId, sourceVolume, sourceRelativePath); Asset-SHA-256 verhindert Doppeluploads. WorkManager inventarisiert danach batchweise und wiederholt den Kontrollscan mindestens im von Android erlaubten 15-Minuten-Raster.
 
 Lokale Abwesenheit darf nur nach einem erfolgreichen, vollständig durchlaufenen Scan bei `FULL`-Medienberechtigung zur DELETE-Queue führen. `PARTIAL`, `NONE`, Selected Photos Access, ein vor oder während der Abfrage verschwundenes Volume, eine fehlgeschlagene Query oder ein Berechtigungswechsel während des Scans sind ausdrücklich keine Löschsignale. Sichtbare Medien dürfen bei `PARTIAL` weiter inventarisiert werden; erst ein späterer bestätigter `FULL`-Scan reconciliert wirklich fehlende Medien.
 

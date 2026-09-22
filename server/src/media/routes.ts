@@ -14,6 +14,8 @@ const assetPageQuery = z.object({
 }).strict();
 const albumBody = z.object({
   clientAlbumId: z.string().trim().min(1).max(255),
+  sourceVolume: z.string().trim().min(1).max(80),
+  sourceRelativePath: z.string().trim().min(1).max(512),
   title: z.string().trim().min(1).max(200),
   shared: z.boolean().default(true),
   backedUp: z.boolean().default(false),
@@ -126,6 +128,8 @@ export function registerMediaRoutes(app: FastifyInstance, config: Config, media:
     reply.code(201).send(await service().createAlbum(request.principal!, parse(albumBody, request.body))));
 
   app.get('/v1/albums', async (request) => service().listAlbums(request.principal!));
+
+  app.get('/v1/backups', async (request) => service().listBackups(request.principal!));
 
   // The partner tab deliberately uses this narrower endpoint instead of filtering the
   // caller's own albums in the client.

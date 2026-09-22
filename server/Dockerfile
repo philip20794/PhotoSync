@@ -1,5 +1,5 @@
 FROM node:24-bookworm-slim AS dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends openssl ca-certificates ffmpeg libheif-examples && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
@@ -21,7 +21,7 @@ FROM dependencies AS production-dependencies
 RUN npm prune --omit=dev
 
 FROM node:24-bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates libheif-examples && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=production-dependencies --chown=node:node /app/node_modules ./node_modules

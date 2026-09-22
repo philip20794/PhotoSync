@@ -57,7 +57,7 @@ class MediaStoreRepository(context: Context) : MediaInventory {
         externalVolumes().forEach { volume ->
             resolver.query(
                 filesUri(volume),
-                ALBUM_PROJECTION,
+                albumProjection(),
                 queryArgs(selection = visibleMediaSelection(), limit = null, offset = null),
                 null,
             )?.use { cursor ->
@@ -70,6 +70,7 @@ class MediaStoreRepository(context: Context) : MediaInventory {
                             volumeName = volume,
                             bucketId = cursor.getString(columns.bucketId) ?: "unknown",
                             bucketName = cursor.getString(columns.bucketName),
+                            relativePath = cursor.albumRelativePath(columns),
                             uri = mediaUri(volume, kind, id).toString(),
                             kind = kind,
                         ),
@@ -208,6 +209,12 @@ private val ALBUM_PROJECTION = arrayOf(
     MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME,
 )
 
+private fun albumProjection(): Array<String> = ALBUM_PROJECTION + if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+    arrayOf(MediaStore.MediaColumns.RELATIVE_PATH)
+} else {
+    arrayOf(MediaStore.MediaColumns.DATA)
+}
+
 private val SYNC_PROJECTION = arrayOf(
     MediaStore.MediaColumns._ID,
     MediaStore.Files.FileColumns.MEDIA_TYPE,
@@ -238,6 +245,9 @@ private class AlbumColumns(cursor: Cursor) {
     val mediaType = cursor.getColumnIndexOrThrow(MediaStore.Files.FileColumns.MEDIA_TYPE)
     val bucketId = cursor.getColumnIndexOrThrow(MediaStore.Images.ImageColumns.BUCKET_ID)
     val bucketName = cursor.getColumnIndexOrThrow(MediaStore.Images.ImageColumns.BUCKET_DISPLAY_NAME)
+    val relativePath = cursor.getColumnIndexOrThrow(
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.MediaColumns.RELATIVE_PATH else MediaStore.MediaColumns.DATA,
+    )
 }
 
 private class SyncColumns(cursor: Cursor) {
@@ -309,4 +319,14 @@ private fun queryArgs(
 ).apply {
     if (limit != null) putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
     if (offset != null) putInt(ContentResolver.QUERY_ARG_OFFSET, offset)
+}
+
+private fun Cursor.albumRelativePath(columns: AlbumColumns): String {
+    val raw = getString(columns.relativePath).orEmpty()
+    val path = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        raw
+    } else {
+        raw.substringBeforeLast('/', missingDelimiterValue = raw)
+    }
+    return path.ifBlank { getString(columns.bucketName) ?: getString(columns.bucketId) }
 }

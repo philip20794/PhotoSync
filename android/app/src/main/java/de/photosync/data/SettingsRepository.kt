@@ -7,6 +7,7 @@ import de.photosync.data.local.SecureCredentialStore
 import de.photosync.data.local.SyncSettingsEntity
 import de.photosync.data.offline.PartnerOfflineRepository
 import de.photosync.data.remote.RetrofitFactory
+import de.photosync.data.remote.PartnerAlbumDto
 import de.photosync.data.remote.UpdateProfileRequest
 import de.photosync.data.sync.SyncScheduler
 import de.photosync.data.sync.remoteScope
@@ -40,6 +41,14 @@ class SettingsRepository(
 
     suspend fun initialize() {
         if (database.settingsDao().get(scope) == null) database.settingsDao().save(SyncSettingsEntity(scope))
+    }
+
+    suspend fun backups(): List<PartnerAlbumDto> = api.backups().albums
+
+    suspend fun restoreBackup(album: PartnerAlbumDto) {
+        PartnerOfflineRepository(appContext, database, scope).restoreOwnBackup(
+            album.id, album.optimizedBytes.toLongOrNull() ?: 0, album.originalBytes.toLongOrNull() ?: 0,
+        )
     }
 
     suspend fun refreshAccount(): de.photosync.data.remote.MeResponse {

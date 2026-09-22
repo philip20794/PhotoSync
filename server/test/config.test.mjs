@@ -30,7 +30,7 @@ for (const [key, value] of [
   ['UPLOAD_SESSION_TTL_MS', '59999'], ['MAX_UPLOAD_CHUNK_BYTES', '65535'],
   ['DERIVATIVE_WORKER_ENABLED', 'yes'], ['FCM_ENABLED', 'yes'], ['SYNC_CHANGE_RETENTION_DAYS', '6'], ['DERIVATIVE_POLL_INTERVAL_MS', '99'],
   ['DERIVATIVE_MAX_ATTEMPTS', '0'], ['DERIVATIVE_TOOL_TIMEOUT_MS', '999'], ['DERIVATIVE_BACKLOG_WARNING', '0'],
-  ['SETUP_TOKEN_HASH', 'plaintext'], ['PAIRING_CODE_TTL_SECONDS', '0'], ['PAIRING_CODE_TTL_SECONDS', '3601'], ['AUTH_RATE_LIMIT_MAX', '0'],
+  ['AUTH_RATE_LIMIT_MAX', '0'],
   ['PORT', ''], ['PORT', '0'], ['PORT', '65536'], ['PORT', '3.1'], ['PORT', 'abc'],
   ['LOG_LEVEL', 'verbose'], ['NODE_ENV', 'prod'], ['DATABASE_URL', 'https://secret.invalid'],
   ['DATABASE_URL', 'postgresql://localhost'], ['MEDIA_DEV_ROOT', 'relative'],

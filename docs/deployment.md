@@ -51,7 +51,6 @@ Eine nicht versionierte Datei `/srv/photosync-storage/photosync/production/confi
 POSTGRES_DB=photosync
 POSTGRES_USER=photosync
 POSTGRES_PASSWORD=<zufälliges URL-sicheres Geheimnis>
-SETUP_TOKEN_HASH=<Ausgabe von: docker compose run --rm server npm run setup:token>
 PHOTOSYNC_STORAGE_ROOT=/srv/photosync-storage/photosync/production
 PHOTOSYNC_STORAGE_UUID=3c37799d-6279-43d7-8b50-362e2266535b
 PHOTOSYNC_PROD_POSTGRES_PATH=/srv/photosync-storage/photosync/production/postgres
@@ -77,26 +76,26 @@ Der Service verlangt den Datenträgermount und die Env-Datei. Die Datenbank ver�
 docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml ps
 ```
 
-Verliert ein bestehender Nutzer alle lokalen Geräte-Credentials, wird nach dem Upgrade ein kurzlebiger Einmalcode direkt im Servercontainer erzeugt:
+Accounts und Geräte werden ausschließlich lokal im laufenden Servercontainer verwaltet:
 
-```bash
-docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env \
-  -f compose.yaml -f compose.production.yaml \
-  exec server npm run --silent operator -- create-pairing-code --user <user-uuid>
-```
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- user list
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- user create Philip
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- user set-password Philip
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- device list Philip
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- device revoke <device-uuid>
 
-Der Befehl verändert keine Nutzer-, Geräte- oder Mediendaten und ist nicht per HTTP erreichbar. Details, Anzeigenamenauswahl und Auditverhalten stehen unter [Lokales Betreiber-Recovery](api.md#lokales-betreiber-recovery).
+set-password liest Passwort und Wiederholung verdeckt von einem TTY; Passwörter dürfen nicht in Argumenten, Env-Dateien oder Logs stehen. Es gibt keinen öffentlichen Admin- oder Recovery-Endpunkt.
 
 ## Reverse Proxy und HTTPS
 
-Nginx Proxy Manager (NPM) ist der einzige öffentliche Einstieg (TCP 80/443). Das vorhandene `gandalf-home.duckdns.org` zeigt auf Home Assistant und kann nicht zugleich PhotoSync bedienen. Zuerst eine **eigene** DuckDNS-Subdomain bzw. einen eigenen DNS-Namen für PhotoSync anlegen und den DuckDNS-Updater entsprechend ergänzen. Danach einmalig das isolierte Netzwerk anlegen und NPM daran anschließen:
+Nginx Proxy Manager (NPM) ist der einzige öffentliche Einstieg (TCP 80/443). Der bestehende PhotoSync-Proxyhost https://philsync.duckdns.org bleibt erhalten. Das isolierte Netzwerk verbindet ausschließlich Nginx Proxy Manager und die PhotoSync-API. Bei einer Neuinstallation sind dafür folgende einmalige Befehle nötig:
 
 ```bash
 docker network create photosync-proxy
 docker network connect photosync-proxy nginx-proxy-manager
 ```
 
-In NPM einen Proxy Host für den neuen PhotoSync-FQDN anlegen:
+Der vorhandene NPM-Proxyhost verwendet:
 
 - Forward scheme `http`, Forward host `photosync-api`, Port `3000`
 - Zugriffsliste nur nach Bedarf; Websocket-Unterstützung ist nicht erforderlich

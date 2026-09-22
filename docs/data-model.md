@@ -1,6 +1,6 @@
 # Datenmodell
 
-Implementiert sind technische Baseline, Authentifizierung, Album-/Originaldateien, der 90-Tage-Papierkorb und wiederaufnehmbare Transfers. Die aktuelle PostgreSQL-Schema-Version ist **11**; `20260923000100_original_integrity` ergänzt den persistenten Diagnosezustand aktiver Originale. PostgreSQL enthält ausschließlich Metadaten; Originalbytes liegen unter dem konfigurierten Medienpfad.
+Implementiert sind technische Baseline, Authentifizierung, Album-/Originaldateien, der 90-Tage-Papierkorb und wiederaufnehmbare Transfers. Die aktuelle PostgreSQL-Schema-Version ist **13**. Migration 13 verwirft bewusst alle früheren PhotoSync-Anwendungsdaten und führt Passwortkonten sowie kontoweit stabile Albumquellen ein. PostgreSQL enthält ausschließlich Metadaten; Originalbytes liegen unter dem konfigurierten Medienpfad.
 
 UUIDs sind stabile Server-IDs. Zeitpunkte werden als `timestamptz(3)` in UTC gespeichert. Dateigrößen und Videodauer sind `bigint` und erscheinen in JSON als Dezimalstrings, damit Android und JavaScript keine Genauigkeit verlieren.
 
@@ -8,12 +8,11 @@ UUIDs sind stabile Server-IDs. Zeitpunkte werden als `timestamptz(3)` in UTC ges
 
 | Tabelle / Prisma-Modell | Wesentliche Felder und Regeln |
 | --- | --- |
-| `service_metadata` / ServiceMetadata | Technische Schema-Version; aktuell `11` |
-| `pairs` / Pair | Eine Instanzzeile, Setupstatus und gemeinsame Sperre für Auth-Mutationen |
-| `users` / User | Account mit Mitgliedsplatz 1 oder 2; höchstens zwei Accounts |
+| `service_metadata` / ServiceMetadata | Technische Schema-Version; aktuell 13 |
+| pairs / Pair | Eine Instanzzeile und gemeinsame Sperre für lokale Account-Mutationen |
+| users / User | UUID, eindeutiger normalisierter Benutzername, Anzeigename, Argon2id-Hash und Accountslot |
 | `devices` / Device | Eigenes Gerät und optionaler eindeutiger Credential-Hash; widerrufene Geräte haben keinen Hash |
-| `pairing_codes` / PairingCode | Gehashter, befristeter Einmalcode für Partner oder weiteres eigenes Gerät |
-| albums / Album | UUID, ownerId, sourceDeviceId, clientAlbumId, Titel, sharedAt, backedUpAt, Erstellungs-/Änderungszeit |
+| albums / Album | UUID, ownerId, Quellgerät, clientAlbumId, sourceVolume, sourceRelativePath, Titel, sharedAt und backedUpAt |
 | `assets` / Asset | UUID, Besitzer und genau ein Album, Originalmetadaten, Quellgeräte-/Client-ID, erwartete und tatsächliche SHA-256, relativer Speicherpfad, Uploadstatus, Integritätsdiagnose und Zeitpunkte |
 | `asset_derivatives` / AssetDerivative | Pro Asset je eine Art `thumbnail` und `optimized`; persistenter Jobstatus, Ausgabemetadaten, Hash, Versuche, Fehler und nächste Ausführungszeit |
 
@@ -23,7 +22,7 @@ Prisma verwaltet zusätzlich `_prisma_migrations`.
 
 Ein Album gehört genau einem Nutzer. `ownerId` ist ein Pflicht-Fremdschlüssel auf `users`. Das Quellgerät wird zusammen mit demselben Besitzer über den zusammengesetzten Fremdschlüssel `(sourceDeviceId, ownerId) → devices(id, userId)` abgesichert. Damit kann selbst eine direkte Datenbankoperation kein fremdes Gerät als Quelle eintragen.
 
-`clientAlbumId` ist die stabile Android-/MediaStore-Zuordnung innerhalb eines Geräts. `UNIQUE(sourceDeviceId, clientAlbumId)` verhindert Dubletten; Albumtitel sind bewusst nicht eindeutig. Die Server-UUID bleibt die API-Identität.
+Die stabile Albumidentität ist UNIQUE(ownerId, sourceVolume, sourceRelativePath). Volume und Pfad werden serverseitig NFKC-normalisiert, getrimmt, slash-normalisiert und kleingeschrieben. clientAlbumId und sourceDeviceId dürfen sich nach einer Neuinstallation ändern; die Server-UUID, Freigabe und Backup-Zuordnung bleiben bestehen.
 
 `sharedAt` ist gesetzt, solange das Album für den anderen Account desselben `Pair` freigegeben ist. Ausschalten setzt es auf `NULL`, ohne Eigentümerdaten oder Originale zu löschen. Der Eigentümer darf das Album weiterhin lesen und erneut freigeben. Der Partner darf nur Alben mit `sharedAt`, darin ausschließlich fertige Assets und deren Originale lesen. Quellgerät und lokale Album-ID werden dem Partner nicht ausgegeben.
 
@@ -92,15 +91,13 @@ Dateien liegen unter `derivatives/<ownerId>/<assetId>/<kind>-<claimId>.<ext>`. J
 
 ## Authentifizierung
 
-Accounts sind passwortlos; jedes Gerät besitzt ein eigenes zufälliges und widerrufbares Token. In PostgreSQL liegen nur zweckgebundene SHA-256-Hashes. Setup, Pairing und Widerruf sind in [API-Dokumentation](api.md) beschrieben.
+Ein User besitzt einen eindeutigen normalisierten Benutzernamen und einen Argon2id-PHC-Hash. Accounts entstehen nur über die lokale Operator-CLI; es existiert kein HTTP-Admin-, Setup-, Pairing- oder Recovery-Endpunkt. Login prüft Argon2id unter einem IP-basierten Rate-Limit und erzeugt pro Anmeldung ein neues Gerät mit einem zufälligen Token. PostgreSQL speichert nur den zweckgebundenen SHA-256-Tokenhash.
 
-Pairing-Codes protokollieren ihren Ursprung. Normal erzeugte Codes referenzieren ihr ausstellendes Gerät; lokale Betreiber-Recovery-Codes besitzen stattdessen `createdByOperator=true` und kein künstliches Gerät. Ein SQL-CHECK erzwingt genau einen Ursprung und beschränkt Operator-Codes auf zusätzliche Geräte bestehender Nutzer. Codehash, TTL, Verbrauch und Widerruf bleiben im gemeinsamen `pairing_codes`-Modell.
-
-Alle Album-/Asset-Routen benötigen ein aktives Gerätetoken. Abfragen werden auf das Pair des authentifizierten Geräts eingeschränkt. Fremde oder noch nicht fertige Partner-Assets liefern 404, damit keine privaten Metadaten oder Uploadzustände offengelegt werden.
+Mehrere Geräte referenzieren denselben User. Widerruf entfernt ausschließlich den Tokenhash des Zielgeräts und setzt revokedAt. Alle Album-/Asset-Routen prüfen bei jedem Request ein aktives Gerät und begrenzen Daten auf Eigentümer beziehungsweise freigegebenen Partnerzustand.
 
 ## Android-Room-Modell
 
-Room-Schema 8 ergänzt die persistente `uploadSessionId` in `upload_queue`; der serverbestätigte Offset liegt in `uploadedBytes`. `shared_albums` unterscheidet intern shareRequested und backupRequested, ohne einen dritten sichtbaren Albumzustand. Queue-, Cursor-, Offline- und Cleanup-Zustände überleben App- und Prozessneustarts. `REMOTE_DELETED` bewahrt ohne Mediendatei den kleinen Variantenwunsch eines gelöschten Partnerassets, insbesondere einzelne ORIGINAL-Overrides. Ein unveränderter belastbarer MediaStore-Befund bewahrt den fertigen Zustand; nur ein erfolgreicher vollständiger Scan mit voller Berechtigung darf lokale Abwesenheit als Löschung werten. Geänderte Bytes bewahren in `REPLACEMENT_PENDING` und `REPLACEMENT_DELETE_PENDING` die alte Server-ID bis zum bestätigten Papierkorbauftrag; erst danach beginnt der neue Upload. Offene, lokal verschwundene Uploads wechseln nach vollständigem Scan über `CANCEL_PENDING` zu `ABANDONED`; spätere Wiederentdeckung erzeugt wieder eine normale Queuezeile. Auch Legacy-Zeilen ohne reale MediaStore-ID verwenden dieses Replacement-Protokoll. Einstellungen, Remote-Metadaten und alle Partner-Offline-Zeilen sind nach Server-URL und Nutzer getrennt.
+Room-Schema 9 ergänzt sourceRelativePath in shared_albums; Schema 8 ergänzte die persistente `uploadSessionId` in `upload_queue`; der serverbestätigte Offset liegt in `uploadedBytes`. `shared_albums` unterscheidet intern shareRequested und backupRequested, ohne einen dritten sichtbaren Albumzustand. Queue-, Cursor-, Offline- und Cleanup-Zustände überleben App- und Prozessneustarts. `REMOTE_DELETED` bewahrt ohne Mediendatei den kleinen Variantenwunsch eines gelöschten Partnerassets, insbesondere einzelne ORIGINAL-Overrides. Ein unveränderter belastbarer MediaStore-Befund bewahrt den fertigen Zustand; nur ein erfolgreicher vollständiger Scan mit voller Berechtigung darf lokale Abwesenheit als Löschung werten. Geänderte Bytes bewahren in `REPLACEMENT_PENDING` und `REPLACEMENT_DELETE_PENDING` die alte Server-ID bis zum bestätigten Papierkorbauftrag; erst danach beginnt der neue Upload. Offene, lokal verschwundene Uploads wechseln nach vollständigem Scan über `CANCEL_PENDING` zu `ABANDONED`; spätere Wiederentdeckung erzeugt wieder eine normale Queuezeile. Auch Legacy-Zeilen ohne reale MediaStore-ID verwenden dieses Replacement-Protokoll. Einstellungen, Remote-Metadaten und alle Partner-Offline-Zeilen sind nach Server-URL und Nutzer getrennt.
 
 ## Noch nicht implementiert
 

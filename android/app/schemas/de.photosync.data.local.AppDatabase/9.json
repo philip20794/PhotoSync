@@ -1,0 +1,836 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 9,
+    "identityHash": "359b45375c591b9c32c9f38950b9822e",
+    "entities": [
+      {
+        "tableName": "server_config",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `baseUrl` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "baseUrl",
+            "columnName": "baseUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "device_session",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER NOT NULL, `userId` TEXT NOT NULL, `userDisplayName` TEXT NOT NULL, `deviceId` TEXT NOT NULL, `deviceName` TEXT NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userId",
+            "columnName": "userId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "userDisplayName",
+            "columnName": "userDisplayName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deviceId",
+            "columnName": "deviceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "deviceName",
+            "columnName": "deviceName",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "shared_albums",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`localAlbumId` TEXT NOT NULL, `mediaStoreAlbumId` TEXT NOT NULL, `sourceDeviceId` TEXT NOT NULL, `volumeName` TEXT NOT NULL, `bucketId` TEXT NOT NULL, `title` TEXT NOT NULL, `relativePath` TEXT NOT NULL, `serverAlbumId` TEXT, `shareRequested` INTEGER NOT NULL, `backupRequested` INTEGER NOT NULL, `remoteShared` INTEGER NOT NULL, `remoteBackedUp` INTEGER NOT NULL, `lastScanAt` INTEGER, `lastError` TEXT, PRIMARY KEY(`localAlbumId`))",
+        "fields": [
+          {
+            "fieldPath": "localAlbumId",
+            "columnName": "localAlbumId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mediaStoreAlbumId",
+            "columnName": "mediaStoreAlbumId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceDeviceId",
+            "columnName": "sourceDeviceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "volumeName",
+            "columnName": "volumeName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bucketId",
+            "columnName": "bucketId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "relativePath",
+            "columnName": "relativePath",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "serverAlbumId",
+            "columnName": "serverAlbumId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "shareRequested",
+            "columnName": "shareRequested",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "backupRequested",
+            "columnName": "backupRequested",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteShared",
+            "columnName": "remoteShared",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteBackedUp",
+            "columnName": "remoteBackedUp",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastScanAt",
+            "columnName": "lastScanAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "localAlbumId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_shared_albums_shareRequested",
+            "unique": false,
+            "columnNames": [
+              "shareRequested"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_shared_albums_shareRequested` ON `${TABLE_NAME}` (`shareRequested`)"
+          },
+          {
+            "name": "index_shared_albums_backupRequested",
+            "unique": false,
+            "columnNames": [
+              "backupRequested"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_shared_albums_backupRequested` ON `${TABLE_NAME}` (`backupRequested`)"
+          },
+          {
+            "name": "index_shared_albums_sourceDeviceId",
+            "unique": false,
+            "columnNames": [
+              "sourceDeviceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_shared_albums_sourceDeviceId` ON `${TABLE_NAME}` (`sourceDeviceId`)"
+          }
+        ]
+      },
+      {
+        "tableName": "upload_queue",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`clientAssetId` TEXT NOT NULL, `localAlbumId` TEXT NOT NULL, `contentUri` TEXT NOT NULL, `originalFileName` TEXT NOT NULL, `mimeType` TEXT NOT NULL, `capturedAtMillis` INTEGER, `fileSize` INTEGER NOT NULL, `width` INTEGER NOT NULL, `height` INTEGER NOT NULL, `durationMillis` INTEGER, `mediaStoreId` INTEGER NOT NULL, `dateModifiedSeconds` INTEGER NOT NULL, `sha256` TEXT, `serverAssetId` TEXT, `status` TEXT NOT NULL, `uploadedBytes` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, `lastError` TEXT, `updatedAt` INTEGER NOT NULL, `uploadSessionId` TEXT, PRIMARY KEY(`clientAssetId`), FOREIGN KEY(`localAlbumId`) REFERENCES `shared_albums`(`localAlbumId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "clientAssetId",
+            "columnName": "clientAssetId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localAlbumId",
+            "columnName": "localAlbumId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "contentUri",
+            "columnName": "contentUri",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originalFileName",
+            "columnName": "originalFileName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mimeType",
+            "columnName": "mimeType",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "capturedAtMillis",
+            "columnName": "capturedAtMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "fileSize",
+            "columnName": "fileSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "width",
+            "columnName": "width",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "height",
+            "columnName": "height",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "durationMillis",
+            "columnName": "durationMillis",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "mediaStoreId",
+            "columnName": "mediaStoreId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dateModifiedSeconds",
+            "columnName": "dateModifiedSeconds",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sha256",
+            "columnName": "sha256",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "serverAssetId",
+            "columnName": "serverAssetId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "uploadedBytes",
+            "columnName": "uploadedBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attempts",
+            "columnName": "attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "uploadSessionId",
+            "columnName": "uploadSessionId",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "clientAssetId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_upload_queue_localAlbumId",
+            "unique": false,
+            "columnNames": [
+              "localAlbumId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_upload_queue_localAlbumId` ON `${TABLE_NAME}` (`localAlbumId`)"
+          },
+          {
+            "name": "index_upload_queue_status",
+            "unique": false,
+            "columnNames": [
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_upload_queue_status` ON `${TABLE_NAME}` (`status`)"
+          },
+          {
+            "name": "index_upload_queue_localAlbumId_mediaStoreId",
+            "unique": false,
+            "columnNames": [
+              "localAlbumId",
+              "mediaStoreId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_upload_queue_localAlbumId_mediaStoreId` ON `${TABLE_NAME}` (`localAlbumId`, `mediaStoreId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "shared_albums",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "localAlbumId"
+            ],
+            "referencedColumns": [
+              "localAlbumId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "sync_settings",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scope` TEXT NOT NULL, `autoBackupEnabled` INTEGER NOT NULL, `wifiOnly` INTEGER NOT NULL, `notifySyncErrors` INTEGER NOT NULL, `lastSuccessfulSyncAt` INTEGER, `serverReachable` INTEGER, `lastServerCheckAt` INTEGER, `lastSyncError` TEXT, PRIMARY KEY(`scope`))",
+        "fields": [
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "autoBackupEnabled",
+            "columnName": "autoBackupEnabled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "wifiOnly",
+            "columnName": "wifiOnly",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "notifySyncErrors",
+            "columnName": "notifySyncErrors",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastSuccessfulSyncAt",
+            "columnName": "lastSuccessfulSyncAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "serverReachable",
+            "columnName": "serverReachable",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastServerCheckAt",
+            "columnName": "lastServerCheckAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "lastSyncError",
+            "columnName": "lastSyncError",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scope"
+          ]
+        }
+      },
+      {
+        "tableName": "offline_albums",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scope` TEXT NOT NULL, `albumId` TEXT NOT NULL, `desiredMode` TEXT NOT NULL, `estimatedOptimizedBytes` INTEGER NOT NULL, `estimatedOriginalBytes` INTEGER NOT NULL, `status` TEXT NOT NULL, `lastError` TEXT, `updatedAt` INTEGER NOT NULL, `metadataCursor` TEXT, `metadataComplete` INTEGER NOT NULL, PRIMARY KEY(`scope`, `albumId`))",
+        "fields": [
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "albumId",
+            "columnName": "albumId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "desiredMode",
+            "columnName": "desiredMode",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "estimatedOptimizedBytes",
+            "columnName": "estimatedOptimizedBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "estimatedOriginalBytes",
+            "columnName": "estimatedOriginalBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "metadataCursor",
+            "columnName": "metadataCursor",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "metadataComplete",
+            "columnName": "metadataComplete",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scope",
+            "albumId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_offline_albums_scope",
+            "unique": false,
+            "columnNames": [
+              "scope"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_offline_albums_scope` ON `${TABLE_NAME}` (`scope`)"
+          },
+          {
+            "name": "index_offline_albums_scope_status",
+            "unique": false,
+            "columnNames": [
+              "scope",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_offline_albums_scope_status` ON `${TABLE_NAME}` (`scope`, `status`)"
+          }
+        ]
+      },
+      {
+        "tableName": "offline_assets",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scope` TEXT NOT NULL, `assetId` TEXT NOT NULL, `albumId` TEXT NOT NULL, `desiredVariant` TEXT NOT NULL, `overridesAlbumMode` INTEGER NOT NULL, `actualVariant` TEXT, `status` TEXT NOT NULL, `variantVersion` TEXT NOT NULL, `expectedSha256` TEXT NOT NULL, `fileSize` INTEGER NOT NULL, `localPath` TEXT, `bytesDownloaded` INTEGER NOT NULL, `attempts` INTEGER NOT NULL, `lastError` TEXT, `updatedAt` INTEGER NOT NULL, `seenGeneration` INTEGER NOT NULL, PRIMARY KEY(`scope`, `assetId`))",
+        "fields": [
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "assetId",
+            "columnName": "assetId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "albumId",
+            "columnName": "albumId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "desiredVariant",
+            "columnName": "desiredVariant",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "overridesAlbumMode",
+            "columnName": "overridesAlbumMode",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "actualVariant",
+            "columnName": "actualVariant",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "variantVersion",
+            "columnName": "variantVersion",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "expectedSha256",
+            "columnName": "expectedSha256",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileSize",
+            "columnName": "fileSize",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localPath",
+            "columnName": "localPath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "bytesDownloaded",
+            "columnName": "bytesDownloaded",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "attempts",
+            "columnName": "attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "seenGeneration",
+            "columnName": "seenGeneration",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scope",
+            "assetId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_offline_assets_scope_albumId",
+            "unique": false,
+            "columnNames": [
+              "scope",
+              "albumId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_offline_assets_scope_albumId` ON `${TABLE_NAME}` (`scope`, `albumId`)"
+          },
+          {
+            "name": "index_offline_assets_scope_status",
+            "unique": false,
+            "columnNames": [
+              "scope",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_offline_assets_scope_status` ON `${TABLE_NAME}` (`scope`, `status`)"
+          }
+        ]
+      },
+      {
+        "tableName": "offline_cleanup",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `kind` TEXT NOT NULL, `scope` TEXT NOT NULL, `albumId` TEXT, `attempts` INTEGER NOT NULL, `lastError` TEXT, `updatedAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "albumId",
+            "columnName": "albumId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attempts",
+            "columnName": "attempts",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastError",
+            "columnName": "lastError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "updatedAt",
+            "columnName": "updatedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "remote_checkpoint",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scope` TEXT NOT NULL, `cursor` TEXT, `pendingCursor` TEXT, `hasMore` INTEGER NOT NULL, PRIMARY KEY(`scope`))",
+        "fields": [
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "cursor",
+            "columnName": "cursor",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pendingCursor",
+            "columnName": "pendingCursor",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "hasMore",
+            "columnName": "hasMore",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scope"
+          ]
+        }
+      },
+      {
+        "tableName": "remote_metadata",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scope` TEXT NOT NULL, `id` TEXT NOT NULL, `kind` TEXT NOT NULL, `albumId` TEXT NOT NULL, `sortKey` TEXT NOT NULL, `json` TEXT NOT NULL, PRIMARY KEY(`scope`, `id`))",
+        "fields": [
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "albumId",
+            "columnName": "albumId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sortKey",
+            "columnName": "sortKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "json",
+            "columnName": "json",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scope",
+            "id"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_remote_metadata_scope_kind_albumId_sortKey",
+            "unique": false,
+            "columnNames": [
+              "scope",
+              "kind",
+              "albumId",
+              "sortKey"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_remote_metadata_scope_kind_albumId_sortKey` ON `${TABLE_NAME}` (`scope`, `kind`, `albumId`, `sortKey`)"
+          }
+        ]
+      },
+      {
+        "tableName": "remote_work",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`scope` TEXT NOT NULL, `id` TEXT NOT NULL, `albumId` TEXT NOT NULL, `assetId` TEXT, `pageCursor` TEXT, PRIMARY KEY(`scope`, `id`))",
+        "fields": [
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "albumId",
+            "columnName": "albumId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "assetId",
+            "columnName": "assetId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "pageCursor",
+            "columnName": "pageCursor",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "scope",
+            "id"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '359b45375c591b9c32c9f38950b9822e')"
+    ]
+  }
+}

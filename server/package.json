@@ -16,13 +16,13 @@
     "migrate:dev": "prisma migrate dev",
     "test": "npm run build && node --test test/*.test.mjs",
     "test:integration": "node --test --test-concurrency=1 test/integration/*.test.mjs",
-    "setup:token": "node dist/auth/setup-token.js",
     "operator": "node dist/auth/operator-cli.js"
   },
   "dependencies": {
     "@fastify/rate-limit": "11.2.0",
     "@prisma/adapter-pg": "7.10.0",
     "@prisma/client": "7.10.0",
+    "argon2": "^0.44.0",
     "fastify": "^5.0.0",
     "firebase-admin": "14.4.0",
     "pg": "^8.16.3",

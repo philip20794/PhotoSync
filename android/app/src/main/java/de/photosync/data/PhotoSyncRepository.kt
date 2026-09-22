@@ -1,15 +1,15 @@
 package de.photosync.data
 
 import android.content.Context
+import android.os.Build
 import androidx.room.withTransaction
 import de.photosync.data.local.AppDatabase
 import de.photosync.data.local.DeviceSessionEntity
 import de.photosync.data.local.SecureCredentialStore
 import de.photosync.data.local.ServerConfigEntity
 import de.photosync.data.remote.AuthResponse
-import de.photosync.data.remote.PairRequest
 import de.photosync.data.remote.RetrofitFactory
-import de.photosync.data.remote.SetupRequest
+import de.photosync.data.remote.LoginRequest
 import de.photosync.domain.model.DeviceSession
 import de.photosync.domain.model.ServerConfig
 import de.photosync.domain.model.SessionState
@@ -54,17 +54,11 @@ class PhotoSyncRepository(
         database.appStateDao().saveServer(ServerConfigEntity(baseUrl = baseUrl))
     }
 
-    suspend fun setup(baseUrl: String, setupToken: String, displayName: String, deviceName: String) {
-        val response = RetrofitFactory.create(baseUrl).setup(
-            "Bearer ${setupToken.trim()}",
-            SetupRequest(displayName.trim(), deviceName.trim()),
-        )
-        persistAuth(response)
-    }
-
-    suspend fun pair(baseUrl: String, code: String, displayName: String?, deviceName: String) {
-        val response = RetrofitFactory.create(baseUrl).pair(
-            PairRequest(code.trim(), displayName?.trim()?.takeIf { it.isNotEmpty() }, deviceName.trim()),
+    suspend fun login(baseUrl: String, username: String, password: String) {
+        val deviceName = listOf(Build.MANUFACTURER, Build.MODEL)
+            .filter(String::isNotBlank).joinToString(" ").ifBlank { "Android-Gerät" }
+        val response = RetrofitFactory.create(baseUrl).login(
+            LoginRequest(username.trim(), password, deviceName),
         )
         persistAuth(response)
     }

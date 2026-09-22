@@ -65,7 +65,7 @@ fun SettingsScreen(context: Context, baseUrl: String, userId: String) {
         deviceName = deviceName,
         onDisplayNameChange = { displayName = it }, onDeviceNameChange = { deviceName = it },
         onSave = { model.saveProfile(displayName, deviceName) }, onWifiOnly = model::setWifiOnly,
-        onAutoBackup = model::setAutoBackup, onClearCache = model::clearCache,
+        onAutoBackup = model::setAutoBackup, onRestoreBackup = model::restoreBackup, onClearCache = model::clearCache,
         onNotifyErrors = { enabled ->
             if (enabled && Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             else model.setNotifyErrors(enabled)
@@ -81,6 +81,7 @@ internal fun SettingsContent(
     deviceName: String,
     onDisplayNameChange: (String) -> Unit = {}, onDeviceNameChange: (String) -> Unit = {}, onSave: () -> Unit = {},
     onWifiOnly: (Boolean) -> Unit = {}, onAutoBackup: (Boolean) -> Unit = {},
+    onRestoreBackup: (de.photosync.data.remote.PartnerAlbumDto) -> Unit = {},
     onClearCache: () -> Unit = {}, onNotifyErrors: (Boolean) -> Unit = {},
 ) {
     val preferences = state.preferences
@@ -107,6 +108,36 @@ internal fun SettingsContent(
         SettingsCard("Synchronisierung") {
             SettingSwitch("Nur über WLAN", "Schont dein mobiles Datenvolumen", preferences?.wifiOnly == true, state.working, onWifiOnly)
             SettingSwitch("Automatisch sichern", "Neue Fotos privat auf deinem Server sichern", preferences?.autoBackupEnabled == true, state.working, onAutoBackup)
+        }
+
+        SettingsCard("Backup wiederherstellen") {
+            if (state.backups.isEmpty()) {
+                Text(
+                    "Noch keine eigenen serverseitigen Backups vorhanden.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            } else {
+                state.backups.forEach { album ->
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+                            Text(album.title, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "${album.assetCount} Medien · ${formatBytes(album.originalBytes)}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        OutlinedButton(
+                            onClick = { onRestoreBackup(album) },
+                            enabled = !state.working,
+                        ) { Text("Herunterladen") }
+                    }
+                }
+            }
         }
 
         SettingsCard("Benachrichtigungen") {
@@ -160,3 +191,9 @@ private fun SettingSwitch(label: String, supporting: String, checked: Boolean, w
 
 private fun formatTime(value: Long?): String =
     value?.let { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it)) } ?: "noch nie"
+
+private fun formatBytes(value: String): String {
+    val bytes = value.toLongOrNull() ?: return "Größe unbekannt"
+    val mebibytes = bytes / (1024.0 * 1024.0)
+    return if (mebibytes < 1024) "%.1f MiB".format(mebibytes) else "%.1f GiB".format(mebibytes / 1024.0)
+}

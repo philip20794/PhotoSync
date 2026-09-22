@@ -21,7 +21,7 @@ export function createDatabase(config: Config) {
     client,
     async check() {
       const metadata = await client.serviceMetadata.findUnique({ where: { key: 'schema_version' } });
-      if (metadata?.value !== '12') throw new Error('Database baseline is missing or incompatible');
+      if (metadata?.value !== '13') throw new Error('Database baseline is missing or incompatible');
     },
     async close() { await client.$disconnect(); },
   } satisfies Database & { client: PrismaClient };

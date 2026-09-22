@@ -32,6 +32,11 @@ class AppViewModel(private val repository: PhotoSyncRepository) : ViewModel() {
         action.copy(session = session)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), AppUiState())
 
+    fun configureRelease(address: String) = runAction {
+        val baseUrl = ServerAddress.normalize(address) ?: error("Ungültige feste Serveradresse.")
+        repository.saveServer(baseUrl)
+    }
+
     fun configureAndTest(address: String) = runAction {
         val baseUrl = ServerAddress.normalize(address) ?: error("Bitte eine vollständige Serveradresse eingeben.")
         repository.testConnection(baseUrl)
@@ -47,14 +52,9 @@ class AppViewModel(private val repository: PhotoSyncRepository) : ViewModel() {
         actionState.value = actionState.value.copy(connectionMessage = "Server ist erreichbar.")
     }
 
-    fun setup(setupToken: String, displayName: String, deviceName: String) = runAction {
-        require(displayName.isNotBlank() && deviceName.isNotBlank() && setupToken.isNotBlank()) { "Bitte alle Felder ausfüllen." }
-        repository.setup(requireServer(), setupToken, displayName, deviceName)
-    }
-
-    fun pair(code: String, displayName: String, deviceName: String) = runAction {
-        require(code.isNotBlank() && deviceName.isNotBlank()) { "Bitte Code und Gerätename ausfüllen." }
-        repository.pair(requireServer(), code, displayName.ifBlank { null }, deviceName)
+    fun login(username: String, password: String) = runAction {
+        require(username.isNotBlank() && password.isNotEmpty()) { "Bitte Benutzername und Passwort eingeben." }
+        repository.login(requireServer(), username, password)
     }
 
     fun verifySession() = runAction {
@@ -104,9 +104,8 @@ private fun Throwable.userMessage(): String = when (this) {
     is IllegalStateException, is IllegalArgumentException -> message ?: "Eingabe prüfen."
     is IOException -> "Server nicht erreichbar. Adresse und Netzwerk prüfen."
     is HttpException -> when (code()) {
-        400 -> "Anfrage abgelehnt. Code und Eingaben prüfen."
-        401 -> "Dieses Gerät ist nicht mehr angemeldet."
-        403 -> "Die Instanzeinrichtung ist nicht erlaubt."
+        400 -> "Bitte Eingaben prüfen."
+        401 -> "Benutzername oder Passwort ist falsch."
         409 -> "Dieser Vorgang ist nicht mehr möglich."
         429 -> "Zu viele Versuche. Bitte kurz warten."
         else -> "Der Server konnte die Anfrage nicht verarbeiten."

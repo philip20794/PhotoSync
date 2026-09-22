@@ -1,168 +1,47 @@
 # PhotoSync HTTP API v1
 
-Implementierter Stand: Instanzeinrichtung, zwei passwortlose Accounts, Geräte-Credentials, Pairing und Widerruf, Album-/Assetmetadaten, resumierbare Originaluploads, asynchrone Medien-Derivate, Byte-Range-Streaming, Change-Feed und 90-Tage-Papierkorb. Basis lokal: `http://127.0.0.1:3000`; zwischen Android und Server ausschließlich über einen vertrauenswürdigen HTTPS-Zugang betreiben. TLS-Terminierung ist weiterhin eine Betriebsaufgabe.
+Implementierter Stand: zwei passwortgeschützte Accounts, widerrufbare Geräte-Credentials, stabile Albumidentität, private Auto-Backups mit Restore, Album-/Assetmetadaten, resumierbare Originaluploads, Medien-Derivate, Change-Feed und Papierkorb. Basis lokal: http://127.0.0.1:3000; Produktion verwendet https://philsync.duckdns.org.
 
 ## Authentifizierung und gemeinsame Regeln
 
-Private Endpunkte verlangen `Authorization: Bearer <accessToken>`. Ein Account besitzt eine UUID und einen Anzeigenamen; der Name ist kein Login und muss nicht eindeutig sein. Es gibt keine Benutzerpasswörter und keinen Passwort-Login. Jedes Gerät besitzt eine eigene UUID sowie ein zufälliges, dauerhaftes, widerrufbares 256-Bit-Token (`psd_...`). Nur dessen SHA-256-Hash mit Zweckpräfix liegt in PostgreSQL. Das Token wird ausschließlich bei Setup oder Pairing ausgegeben und kann später nicht abgerufen werden.
+Accounts werden ausschließlich lokal durch den Operator angelegt. Jeder Account besitzt eine UUID, einen eindeutigen normalisierten Benutzernamen (NFKC, getrimmt, kleingeschrieben), einen Anzeigenamen und optional einen Argon2id-Passwort-Hash. Passwörter werden nie als CLI-Argument, API-Log oder Klartext in PostgreSQL gespeichert.
 
-Tokens in der Android-App in geschütztem, vom Keystore unterstütztem Speicher halten und von Backups ausschließen. Keine Tokens in URL, Queryparametern oder Cookies; der Server akzeptiert dort keine Anmeldung. Tokens und Pairing-Codes werden nicht geloggt. Antworten tragen `Cache-Control: no-store` und eine servergenerierte `x-request-id`. IDs sind UUIDs, Zeitpunkte UTC als ISO-8601.
+POST /v1/auth/login ist neben den Health-Routen der einzige öffentliche Anwendungsendpunkt. Alle anderen Routen sind standardmäßig privat und verlangen Authorization: Bearer <accessToken>. Ein erfolgreicher Login erzeugt ein neues Gerät mit eigenem zufälligem 256-Bit-Token (psd_...); serverseitig liegt nur dessen zweckgebundener SHA-256-Hash. Eine Neuinstallation meldet sich am bestehenden Account an und erzeugt deshalb nur eine neue Device-Zeile, niemals einen neuen Nutzer.
 
-Alle Routen sind standardmäßig privat, auch neu hinzugefügte. Explizite Ausnahmen: `GET /health`, `POST /v1/auth/setup`, `POST /v1/auth/pair`. Setup benötigt trotzdem sein separates Betreibergeheimnis, Pairing einen gültigen Einmalcode. Unbekannte URLs liefern ohne gültiges Geräte-Token 401 und mit gültigem Token 404.
+Antworten tragen Cache-Control: no-store und x-request-id. Tokens und Passwörter dürfen nicht in URL, Queryparametern oder Logs erscheinen. 401 verwendet bewusst dieselbe Meldung für unbekannte Nutzer und falsche Passwörter. Login ist je IP und Route auf AUTH_RATE_LIMIT_MAX Versuche pro Minute begrenzt; Überschreitung liefert 429 mit Retry-After.
 
-Fehlerformat:
+### POST /v1/auth/login
 
-```json
-{"error":{"code":"UNAUTHORIZED","message":"Valid device credentials required","requestId":"<uuid>"}}
-```
+    {"username":"Philip","password":"<passwort>","deviceName":"Google Pixel 9"}
 
-401 setzt zusätzlich `WWW-Authenticate: Bearer`. Ungültige Eingaben liefern 400, nicht erlaubte Setup-Versuche 403, fremde/unbekannte Ressourcen 404, belegte Accounts oder erneutes Setup 409 und überschrittene Rate-Limits 429 mit `Retry-After` (Sekunden). Unerwartete Fehler liefern 500 ohne interne Details. Health verwendet sein eigenes Statusformat.
+Erfolg 201:
 
-## Ersteinrichtung
+    {
+      "user":{"id":"<user-uuid>","username":"philip","displayName":"Philip"},
+      "device":{"id":"<device-uuid>","name":"Google Pixel 9","createdAt":"<UTC>","revokedAt":null},
+      "accessToken":"psd_<secret>",
+      "tokenType":"Bearer"
+    }
 
-Der Betreiber erzeugt **einmal lokal** ein Setup-Geheimnis:
+Android hält nur das Gerätetoken im Keystore-geschützten Speicher. Das Passwort wird nach dem Login verworfen. Jedes weitere oder neu installierte Gerät verwendet denselben Benutzernamen und dasselbe Passwort und erhält ein eigenes widerrufbares Token.
 
-```sh
-docker compose exec -T server node dist/auth/setup-token.js
-```
+### Account und Geräte
 
-Die Ausgabe enthält `setupToken` und `SETUP_TOKEN_HASH`. Nur den Hash in die lokale `.env` bzw. `.env.production` übernehmen. Das Setup-Token dem ersten Nutzer sicher übergeben; es wird nicht in Konfigurationsdateien oder der Datenbank gespeichert. Nicht in Shell-Historie, Tickets oder Logs kopieren. Danach die Konfiguration übernehmen:
+GET /v1/me liefert eigenen Nutzer, aktuelles Gerät und den Partneraccount. PATCH /v1/me ändert Anzeigename und Gerätename. GET /v1/devices listet ausschließlich eigene aktive und widerrufene Geräte. DELETE /v1/devices/{id} widerruft ein eigenes Gerät idempotent, entfernt seinen Tokenhash und setzt revokedAt; andere Geräte bleiben gültig.
 
-```sh
-docker compose up -d --wait server
-```
+Es gibt keinen öffentlichen Admin-, Setup-, Pairing-, Passwortänderungs- oder Recovery-Endpunkt. Direkter lokaler Serverzugriff ist für Accountverwaltung erforderlich:
 
-Leerer `SETUP_TOKEN_HASH` deaktiviert das Setup. Das Erzeugen eines Tokens konfiguriert noch keinen Account. Ein bestehendes Setup lässt sich durch Austausch des Hashes nicht zurücksetzen. Nach der Einrichtung den Hash aus der Umgebung entfernen und den Server erneut starten.
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- user list
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- user create Philip
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- user set-password Philip
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- device list Philip
+    docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env -f compose.yaml -f compose.production.yaml exec server npm run --silent operator -- device revoke <device-uuid>
 
-### POST /v1/auth/setup
-
-Öffentlich erreichbar, aber nur mit `Authorization: Bearer <setupToken>` erlaubt. Das Geräte-Token kann diesen Vorgang nicht autorisieren.
-
-```json
-{"displayName":"Alice","deviceName":"Alice Pixel"}
-```
-
-Beide Namen: nach Trimmen 1–80 Zeichen. Unbekannte Felder werden abgelehnt. Erfolg **201**:
-
-```json
-{
-  "user":{"id":"<user-uuid>","displayName":"Alice"},
-  "device":{"id":"<device-uuid>","name":"Alice Pixel","createdAt":"<UTC>","revokedAt":null},
-  "accessToken":"psd_<secret>",
-  "tokenType":"Bearer"
-}
-```
-
-Erzeugt atomar Nutzer in Mitgliedsplatz 1, dessen erstes Gerät und den dauerhaften Setup-Abschluss. Gleichzeitige Setup-Aufrufe können nur einen Erfolg erzeugen. Danach **409 ALREADY_CONFIGURED** bei gültigem Setup-Geheimnis, sonst **403 SETUP_FORBIDDEN**. Kein öffentliches Setup-Status-/Nutzerverzeichnis.
-
-## Einladen und Geräte hinzufügen
-
-### POST /v1/auth/pairing-codes
-
-Geräte-Authentifizierung erforderlich. Body:
-
-```json
-{"purpose":"partner"}
-```
-
-- `partner`: belegt beim Einlösen den zweiten Accountplatz. Wenn schon zwei Accounts existieren: **409 PAIR_FULL**.
-- `device`: verbindet ein weiteres Gerät mit dem Account des Aufrufers. Kein `userId`-/`targetUserId`-Parameter erlaubt; niemand kann damit Geräte für den Partner anlegen.
-
-Erfolg **201**:
-
-```json
-{"id":"<code-uuid>","code":"ABCD-1234-ABCD-1234-ABCD-1234-ABCD-1234","purpose":"partner","expiresAt":"<UTC>"}
-```
-
-Der Beispielcode ist nur ein Formatbeispiel. Echte Codes enthalten 128 zufällige Bits (acht Vierergruppen Hex). Lebensdauer standardmäßig zehn Minuten; `PAIRING_CODE_TTL_SECONDS` konfiguriert 60–3600 Sekunden. Ablauf wird anhand der PostgreSQL-Uhr geprüft. Der Klartextcode wird nur in dieser Antwort zurückgegeben. Nur dessen zweckgebundener Hash wird gespeichert.
-
-Ein späterer QR-Code kann denselben Code und die Serveradresse transportieren; QR-Erzeugung und -Scan sind noch nicht implementiert. Ein solcher QR-Code ist ebenfalls ein Geheimnis, kein dauerhafter öffentlicher Link.
-
-### POST /v1/auth/pair
-
-Ohne vorhandenes Geräte-Token. Für den Partner:
-
-```json
-{"code":"<pairing-code>","displayName":"Bob","deviceName":"Bob Samsung"}
-```
-
-Für ein weiteres eigenes Gerät:
-
-```json
-{"code":"<pairing-code>","deviceName":"Alice Tablet"}
-```
-
-Bei `partner` ist `displayName` erforderlich; bei `device` ist es nicht erlaubt. Namen unterliegen denselben Grenzen wie beim Setup. Der Code wird in dargestellter Gruppierung oder als 32 Hexzeichen akzeptiert, Groß-/Kleinschreibung ist egal. Andere Felder werden abgelehnt.
-
-Erfolg **201**, Antwort wie beim Setup: Account, neues Gerät und ein neues eigenes `accessToken`. Ein zusätzlicher Gerätezugang behält die User-ID und erhält eine neue Geräte-ID und ein anderes Token. Ein Partnerzugang erhält eine andere User-ID.
-
-Unbekannte, abgelaufene, verbrauchte oder widerrufene Codes liefern einheitlich **400 INVALID_PAIRING_CODE**. Fehlende/unerlaubte Eingabefelder liefern **400 INVALID_REQUEST** und verbrauchen keinen Code. Nutzer-/Geräteanlage und Codeverbrauch werden zusammen committed. Zwei gleichzeitige Einlösungen desselben Codes führen zu genau einem Erfolg; unterschiedliche konkurrierende Partnercodes können keinen dritten Account erzeugen.
-
-### DELETE /v1/auth/pairing-codes/{id}
-
-Geräte-Authentifizierung erforderlich. Widerruft einen Code, den eines der eigenen Geräte erzeugt hat. **204**; bei fremder oder unbekannter ID **404**. Ein erneuter Widerruf desselben eigenen Codes ist unschädlich. Verbrauchte oder widerrufene Codes werden nie wieder gültig.
-
-## Account und Geräte
-
-### GET /v1/me
-
-Geräte-Authentifizierung erforderlich. **200**, aktuelle Account-/Geräteidentität:
-
-```json
-{"user":{"id":"<uuid>","displayName":"Alice"},"device":{"id":"<uuid>","name":"Alice Pixel","createdAt":"<UTC>","revokedAt":null},"partner":{"id":"<uuid>","displayName":"Bob"}}
-```
-
-`partner` ist `null`, solange kein Partneraccount existiert. Anzeigename und Gerätename werden mit `PATCH /v1/me` geändert:
-
-```json
-{"displayName":"Alice neu","deviceName":"Neues Pixel"}
-```
-
-Die Änderung wird gemeinsam für Account und Gerät committed und erscheint bei der nächsten `GET /v1/me`-Antwort beider Accounts.
-
-### GET /v1/devices
-
-Geräte-Authentifizierung erforderlich. **200**, ausschließlich Geräte des eigenen Accounts, einschließlich widerrufener Einträge:
-
-```json
-{"devices":[{"id":"<uuid>","name":"Alice Pixel","createdAt":"<UTC>","revokedAt":null}]}
-```
-
-Keine Tokens, Hashes oder Geräte des Partners in der Antwort.
-
-### DELETE /v1/devices/{id}
-
-Geräte-Authentifizierung erforderlich. Widerruft ein eigenes Gerät, auch das aufrufende Gerät: **204**. Fremde oder unbekannte Geräte: **404**. Wiederholter Widerruf durch ein anderes aktives eigenes Gerät liefert ebenfalls 204.
-
-Widerruf setzt `revokedAt`, entfernt den Credential-Hash und widerruft offene Einladungen dieses Geräts. Danach werden dessen Requests mit **401** abgelehnt. Andere Geräte behalten ihre Credentials. Authentifizierung fragt bei jedem Request PostgreSQL ab; es gibt keinen Token-Cache und keine JWT-Nachlaufzeit. Bereits laufende Leseanfragen können noch fertig werden; Auth-Mutationen prüfen den Gerätezustand nach Erwerb der Transaktionssperre nochmals.
-
-## Grenzen und Betrieb
-
-Setup, Codeeinlösung und Codeerstellung sind standardmäßig auf zehn Anfragen je IP und Endpunkt pro Minute begrenzt (`AUTH_RATE_LIMIT_MAX`). Der begrenzte In-Memory-Zähler gilt für einen Backend-Prozess und wird bei Neustart geleert; bei mehreren Replikas einen gemeinsamen Rate-Limit-Speicher ergänzen. Forwarded-IP-Header werden nicht vertraut. Hinter einem Reverse-Proxy teilen sich Clients daher zunächst dessen Limit; Proxy-Vertrauen nur mit enger Proxy-Allowlist konfigurieren.
-
-Die Instanz hat maximal zwei Accounts, aber beliebig viele eigene Geräte. Es gibt keine Accountlöschung, Passwort-/Recovery-Anmeldung oder administrative Übernahme über HTTP. Die Ersteinrichtung darf für Recovery nicht erneut freigeschaltet werden.
-
-### Lokales Betreiber-Recovery
-
-Falls kein angemeldetes Gerät mehr verfügbar ist, erzeugt ausschließlich der lokale Operator-Prozess im laufenden Servercontainer einen normalen Einmalcode für ein weiteres Gerät:
-
-```bash
-docker compose --env-file /srv/photosync-storage/photosync/production/config/production.env \
-  -f compose.yaml -f compose.production.yaml \
-  exec server npm run --silent operator -- create-pairing-code --user <user-uuid>
-```
-
-Alternativ ist eine exakte Auswahl über `--display-name <anzeigename>` möglich. Kein Treffer und mehrere Nutzer mit demselben Anzeigenamen brechen ohne Schreibvorgang ab. Die User-ID ist deshalb für den Produktionsbetrieb vorzuziehen.
-
-Der Befehl besitzt keine HTTP-Route und benötigt direkten lokalen Zugriff auf Containerumgebung und Datenbank. Er gibt bei Erfolg ausschließlich Nutzer, Klartextcode und Gültigkeitsdauer aus. Der Klartext erscheint nur in dieser angehängten Terminalausgabe. In PostgreSQL bleiben ausschließlich sein zweckgebundener Hash und auditierbare Erzeugungsmetadaten (`createdByOperator=true`) erhalten; normale Serverlogs erhalten keinen Code. Operator-Codes nutzen dieselbe konfigurierte TTL, Transaktionssperre, Einmalverwendung und Einlösung über `POST /v1/auth/pair` wie geräteerzeugte Codes.
-
-Da rohe Credentials nicht gespeichert werden, können verlorene Erfolgsantworten nicht erneut abgerufen werden. Bei einem zusätzlichen Gerät von einem vorhandenen Gerät aus einen neuen Code erzeugen und den verwaisten Zugang widerrufen. Geht die allererste Setup-/Partner-Erfolgsantwort verloren, ist ebenfalls Betreiber-Recovery erforderlich. HTTP-Clients dürfen fehlgeschlagene Einlösungen daher nicht als erfolgreich behandeln oder unbemerkt neue Accounts erwarten.
-
-DB-Backups enthalten nur Credential-/Code-Hashes, aber weiterhin private Metadaten. Eine Wiederherstellung alter Backups kann alte Widerrufszustände zurücksetzen; anschließend Gerätezugänge überprüfen. Abgelaufene Codezeilen bleiben vorerst als Metadaten erhalten; sie enthalten keine Klartextcodes.
+user set-password verlangt ein interaktives TTY, liest Passwort und Wiederholung verdeckt und akzeptiert keine Passwortargumente oder Pipe-Eingabe. Passwörter müssen 12 bis 1024 Zeichen lang sein. Die Instanz ist auf die zwei Accountplätze Philip und Runa ausgelegt.
 
 ## Health
 
-`GET /health/live` ist eine von Datenbank, Medienpfad und Konvertierungsqueue unabhängige Liveness-Antwort. `GET /health` bleibt ebenfalls ohne Token erreichbar und prüft Schema-Version 12, Medienverzeichnis sowie bei aktiviertem Worker die Verfügbarkeit von `ffmpeg` und `ffprobe`. Fehlende harte Voraussetzungen liefern **503**. Die Antwort enthält zusätzlich Queuezahlen. Ein großer Rückstand oder ein über Tool-Timeout hinaus festhängender Job erscheint als `derivatives: "degraded"`, bleibt aber **200**, damit ein Neustart die persistente Queue nicht verschlimmert. Keine Accounts, Geräte oder Credentials werden ausgegeben.
+`GET /health/live` ist eine von Datenbank, Medienpfad und Konvertierungsqueue unabhängige Liveness-Antwort. `GET /health` bleibt ebenfalls ohne Token erreichbar und prüft Schema-Version 13, Medienverzeichnis sowie bei aktiviertem Worker die Verfügbarkeit von `ffmpeg` und `ffprobe`. Fehlende harte Voraussetzungen liefern **503**. Die Antwort enthält zusätzlich Queuezahlen. Ein großer Rückstand oder ein über Tool-Timeout hinaus festhängender Job erscheint als `derivatives: "degraded"`, bleibt aber **200**, damit ein Neustart die persistente Queue nicht verschlimmert. Keine Accounts, Geräte oder Credentials werden ausgegeben.
 
 Offizielle Grundlagen: [Node.js Crypto](https://nodejs.org/docs/latest-v24.x/api/crypto.html), [Fastify Auth-Hooks](https://fastify.dev/docs/latest/Reference/Hooks/), [Rate-Limit-Plugin](https://github.com/fastify/fastify-rate-limit), [Prisma-Transaktionen](https://docs.prisma.io/docs/orm/v7/prisma-client/queries/transactions).
 
@@ -173,13 +52,13 @@ Alle Album- und Assetendpunkte benötigen ein aktives Geräte-Token. Eigene Albe
 
 ### POST /v1/albums
 
-Legt ein Album für den authentifizierten Nutzer und das aufrufende Quellgerät an:
+Legt ein Album für den authentifizierten Nutzer anhand seiner kontoweit stabilen Quelle an:
 
 ```json
-{"clientAlbumId":"primary:camera","title":"Kamera"}
+{"clientAlbumId":"primary:camera","sourceVolume":"external_primary","sourceRelativePath":"pictures/kamera","title":"Kamera"}
 ```
 
-`clientAlbumId`: 1–255 Zeichen und innerhalb des Geräts eindeutig. `title`: 1–200 Zeichen. `shared` (Standard `true`) steuert die Partnerfreigabe, `backedUp` (Standard `false`) aktiviert den dauerhaften privaten Backup-Marker. Erfolg **201**:
+sourceVolume und der normalisierte sourceRelativePath bilden zusammen mit dem authentifizierten Eigentümer die stabile Identität. clientAlbumId bleibt nur eine lokale Diagnose-ID. title umfasst 1–200 Zeichen; shared steuert die Partnerfreigabe und backedUp den privaten Backup-Marker.
 
 ```json
 {
@@ -191,12 +70,14 @@ Legt ein Album für den authentifizierten Nutzer und das aufrufende Quellgerät 
   "backedUp":false,
   "sourceDeviceId":"<device-uuid>",
   "clientAlbumId":"primary:camera",
+  "sourceVolume":"external_primary",
+  "sourceRelativePath":"pictures/kamera",
   "createdAt":"<UTC>",
   "updatedAt":"<UTC>"
 }
 ```
 
-Ein erneuter Aufruf mit derselben `clientAlbumId` auf demselben Gerät liefert dieselbe Server-ID, aktualisiert den Titel und setzt die angeforderten Zustände idempotent. Ein bereits gesetzter privater Backup-Marker wird beim Ausschalten des Schalters nicht entfernt. Wird das Album später geteilt, werden vorhandene Assets wiederverwendet. Dadurch kann Android nach einem verlorenen Response sicher wiederholen. Andere Geräte desselben Accounts besitzen einen eigenen Namensraum.
+Ein erneuter Aufruf desselben Accounts mit gleich normalisiertem Volume/RelativePath liefert dieselbe Server-ID – auch von einem neuen Gerät. Der vorhandene Share-Status wird dabei nicht überschrieben; eine bewusste Änderung erfolgt über PATCH. Ein bereits gesetzter Backup-Marker bleibt erhalten. Inhaltsgleiche Assets werden über den SHA-256-Constraint desselben Albums wiederverwendet.
 
 ### PATCH /v1/albums/{id}
 
@@ -206,7 +87,7 @@ Setzt als Eigentümer den Freigabestatus:
 {"shared":false}
 ```
 
-Erfolg **200** liefert das Album mit `shared=false`. Eigene Metadaten und Originale bleiben erhalten, der Partner erhält für Album, Assets und Downloads anschließend **404**. Erneutes `POST /v1/albums` oder `PATCH` mit `shared=true` aktiviert die Freigabe wieder. Fremde oder unbekannte IDs liefern **404**.
+Erfolg **200** liefert das Album mit `shared=false`. Eigene Metadaten und Originale bleiben erhalten, der Partner erhält für Album, Assets und Downloads anschließend **404**. PATCH mit shared=true aktiviert die Freigabe wieder. Fremde oder unbekannte IDs liefern **404**.
 
 ### GET /v1/albums
 
@@ -399,3 +280,7 @@ GET /v1/albums/{albumId}/assets akzeptiert limit zwischen 1 und 100 (Standard 60
 `DELETE /v1/trash/assets/{id}` löscht ein Asset sofort endgültig; `DELETE /v1/trash/assets` und `DELETE /v1/trash` löschen mehrere beziehungsweise alle eigenen Papierkorb-Assets. Der Server claimt das Asset mit einer Cleanup-Lease als `purging`, entfernt Original und Derivate, markiert danach `purged` und entfernt nicht mehr gültige Derivatmetadaten. Nach Beginn der Dateilöschung bleibt ein Fehler in `purging` retryfähig; Restore ist dann ausgeschlossen. Nur abgelaufene Leases werden nach einem Prozessabbruch übernommen. Die verbindliche automatische Aufbewahrung beträgt 90 Tage.
 
 Ein geteilter Lösch- oder Restore-Vorgang erzeugt genau eine fachliche DELETE- beziehungsweise RESTORE-Änderung. Rein private Auto-Backup-Assets erzeugen kein Partnerereignis. Nach physischer Bereinigung bleibt ein `purged`-Tombstone in PostgreSQL, damit ein lange offline gewesenes Gerät das Asset nicht wieder anlegt.
+
+## Eigene Backups und Restore
+
+GET /v1/backups liefert ausschließlich eigene Alben mit gesetztem backedUpAt, inklusive Assetanzahl und Größen. Partnerbackups sind nicht sichtbar. Android zeigt diese Liste unter **Backup wiederherstellen** und lädt auf Wunsch die Originalvarianten über dieselben autorisierten, resumierbaren und persistenten Offline-Transfers herunter. Ein neues Gerät kann damit eigene Backups abrufen, ohne Albumfreigaben oder einen erneuten Upload zu erzeugen.

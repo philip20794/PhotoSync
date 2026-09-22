@@ -85,3 +85,11 @@ Private Backups von Datenbank und Festplatte auf getrennte eigene Hardware plane
 Der Partner-Tab fragt ausschliesslich einen schmalen Partneralbum-Endpunkt ab; die Serverberechtigung begrenzt ihn auf freigegebene Alben des anderen Accounts. Albumkarten enthalten nur Zaehler und ein optionales Cover. Ein geoeffnetes Album nutzt cursorbasiertes Paging (60 Metadaten, begrenzter Prefetch), keine Gesamtliste und keine vorsorglichen Originaldownloads.
 
 Im Android-cacheDir liegen getrennte, jederzeit loeschbare Partner-Cachebereiche: LRU-Dateien fuer Thumbnail/optimierte Bilder sowie der Media3-Range-Cache fuer optimierte Videos. Variantentyp, Derivatzeitpunkt und Hash gehoeren zum Schluessel. Bildcache-Finals werden vor Wiederverwendung per SHA-256 validiert; Download und Copy-Fallback schreiben nur `.part` und finalisieren atomar. Dieser fluechtige Cache ist nicht Room-verwaltet und technisch strikt vom erst in Schritt 10 geplanten Offline-Dateispeicher getrennt. Fotos laden beim Oeffnen nur die optimierte Variante und unterstuetzen Zoom; Videos spielen die optimierte MP4 per Range-Streaming ab.
+
+## Dauerhafte Accounts und Reinstall
+
+Philip und Runa sind feste Serveraccounts mit normalisiertem Login-Namen und Argon2id-Passwort. Jede erfolgreiche Anmeldung registriert lediglich ein neues widerrufbares Gerät. Release-Builds verwenden fest https://philsync.duckdns.org und zeigen nur Benutzername, Passwort und Anmelden.
+
+Die fachliche Albumquelle ist ownerUserId plus MediaStore-Volume plus normalisierter RelativePath. Android gleicht nach Login eigene Serveralben mit lokalen MediaStore-Alben ab und übernimmt Server-ID, Share- und Backup-Status, bevor es inventarisiert. Der Server-Constraint verhindert parallele Alben derselben Quelle. Der Inhalts-Hash-Constraint im Album verhindert einen zweiten Asset-/Originalupload nach Reinstall.
+
+Eigene backedUp-Alben sind über einen separaten autorisierten Endpunkt sichtbar. Backup wiederherstellen nutzt die bestehende persistente, resumierbare Offline-Downloadqueue mit ORIGINAL-Variante und accountgescopten Pfaden; Partnerbackups werden nie geliefert.

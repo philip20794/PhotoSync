@@ -9,7 +9,7 @@ import { Readable } from 'node:stream';
 import test from 'node:test';
 import { buildApp } from '../../dist/app.js';
 import { createAuthService } from '../../dist/auth/service.js';
-import { hashSecret, newSetupToken } from '../../dist/auth/secrets.js';
+import { createOperatorService } from '../../dist/auth/operator.js';
 import { loadConfig } from '../../dist/config.js';
 import { createDatabase } from '../../dist/database.js';
 import { createMediaService } from '../../dist/media/service.js';
@@ -169,10 +169,8 @@ const call = (app, token, method, url, payload, headers = {}) => app.inject({
 });
 
 async function fixture(t) {
-  const setupToken = newSetupToken();
   const config = loadConfig({
     ...process.env,
-    SETUP_TOKEN_HASH: hashSecret(setupToken, 'setup'),
     AUTH_RATE_LIMIT_MAX: '1000',
     MAX_UPLOAD_BYTES: '1048576',
     UPLOAD_LEASE_MS: '5000',
@@ -183,7 +181,6 @@ async function fixture(t) {
   const clear = async () => {
     await client.asset.deleteMany();
     await client.album.deleteMany();
-    await client.pairingCode.deleteMany();
     await client.device.deleteMany();
     await client.user.deleteMany();
     await client.pair.updateMany({ data: { setupCompletedAt: null } });
@@ -198,23 +195,24 @@ async function fixture(t) {
     await rm(config.mediaRoot, { recursive: true, force: true });
     await mkdir(config.mediaRoot, { recursive: true });
   });
-  const setup = await call(app, setupToken, 'POST', '/v1/auth/setup',
-    { displayName: 'Alice', deviceName: 'Alice phone' });
-  assert.equal(setup.statusCode, 201, setup.body);
-  const alice = setup.json();
-  const invitation = await call(app, alice.accessToken, 'POST', '/v1/auth/pairing-codes',
-    { purpose: 'partner' });
-  assert.equal(invitation.statusCode, 201, invitation.body);
-  const paired = await app.inject({ method: 'POST', url: '/v1/auth/pair', payload: {
-    code: invitation.json().code, displayName: 'Bob', deviceName: 'Bob phone',
-  } });
-  assert.equal(paired.statusCode, 201, paired.body);
-  return { app, client, config, alice, bob: paired.json() };
+  const operator = createOperatorService(client);
+  await operator.createUser('Alice');
+  await operator.createUser('Bob');
+  await operator.setPassword('Alice', 'alice-test-password');
+  await operator.setPassword('Bob', 'bob-test-password');
+  const login = async (username, password, deviceName) => {
+    const response = await app.inject({ method: 'POST', url: '/v1/auth/login', payload: { username, password, deviceName } });
+    assert.equal(response.statusCode, 201, response.body);
+    return response.json();
+  };
+  const alice = await login('Alice', 'alice-test-password', 'Alice phone');
+  const bob = await login('Bob', 'bob-test-password', 'Bob phone');
+  return { app, client, config, alice, bob, login };
 }
 
 async function createAlbum(app, token, clientAlbumId = 'camera') {
   const response = await call(app, token, 'POST', '/v1/albums',
-    { clientAlbumId, title: 'Camera' });
+    { clientAlbumId, sourceVolume: 'external_primary', sourceRelativePath: 'Pictures/' + clientAlbumId, title: 'Camera' });
   assert.equal(response.statusCode, 201, response.body);
   return response.json();
 }
@@ -409,18 +407,58 @@ test('sharing is reversible and partner can only access shared albums', async (t
   assert.equal((await call(app, alice.accessToken, 'GET', '/v1/albums/' + album.id)).json().shared, false);
 
   const relinked = await call(app, alice.accessToken, 'POST', '/v1/albums', {
-    clientAlbumId: 'private-switch', title: 'Camera renamed',
+    clientAlbumId: 'after-reinstall', sourceVolume: 'EXTERNAL_PRIMARY', sourceRelativePath: 'pictures/private-switch/', title: 'Camera renamed',
   });
   assert.equal(relinked.statusCode, 201, relinked.body);
   assert.equal(relinked.json().id, album.id);
-  assert.equal(relinked.json().shared, true);
-  assert.equal((await call(app, bob.accessToken, 'GET', '/v1/albums/' + album.id)).statusCode, 200);
+  assert.equal(relinked.json().shared, false);
+  assert.equal((await call(app, bob.accessToken, 'GET', '/v1/albums/' + album.id)).statusCode, 404);
+  const reshared = await call(app, alice.accessToken, 'PATCH', '/v1/albums/' + album.id, { shared: true });
+  assert.equal(reshared.json().shared, true);
+});
+
+test('reinstall on a new device adopts the same album, share state and assets', async (t) => {
+  const { app, client, alice, bob, login } = await fixture(t);
+  const original = await createAlbum(app, alice.accessToken, 'reinstall');
+  const bytes = Buffer.from('existing bytes');
+  const expectedSha256 = createHash('sha256').update(bytes).digest('hex');
+  const firstAsset = await createAsset(app, alice.accessToken, original.id, bytes, {
+    clientAssetId: 'old-device-asset',
+    expectedSha256,
+  });
+  await client.asset.update({
+    where: { id: firstAsset.id },
+    data: { status: 'ready', sha256: expectedSha256 },
+  });
+
+  const newDevice = await login('ALICE', 'alice-test-password', 'Fresh install');
+  const adopted = await call(app, newDevice.accessToken, 'POST', '/v1/albums', {
+    clientAlbumId: 'new-local-bucket',
+    sourceVolume: 'EXTERNAL_PRIMARY',
+    sourceRelativePath: 'pictures/reinstall/',
+    title: 'Camera after reinstall',
+    shared: false,
+  });
+  assert.equal(adopted.statusCode, 201, adopted.body);
+  assert.equal(adopted.json().id, original.id);
+  assert.equal(adopted.json().shared, true);
+  assert.equal(await client.album.count({ where: { ownerId: alice.user.id } }), 1);
+  assert.equal((await call(app, bob.accessToken, 'GET', '/v1/albums/' + original.id)).statusCode, 200);
+
+  const reused = await createAsset(app, newDevice.accessToken, original.id, bytes, {
+    clientAssetId: 'new-device-asset',
+    expectedSha256,
+  });
+  assert.equal(reused.id, firstAsset.id);
+  assert.equal(await client.asset.count({ where: { albumId: original.id } }), 1);
 });
 
 test('private backup and later sharing reuse one album and one asset without duplicate upload', async (t) => {
-  const { app, client, alice, bob } = await fixture(t);
+  const { app, client, alice, bob, login } = await fixture(t);
   const create = await call(app, alice.accessToken, 'POST', '/v1/albums', {
     clientAlbumId: 'private-camera',
+    sourceVolume: 'external_primary',
+    sourceRelativePath: 'Pictures/Camera',
     title: 'Camera',
     shared: false,
     backedUp: true,
@@ -429,12 +467,15 @@ test('private backup and later sharing reuse one album and one asset without dup
   const album = create.json();
   assert.equal(album.shared, false);
   assert.equal(album.backedUp, true);
+  assert.deepEqual((await call(app, alice.accessToken, 'GET', '/v1/backups')).json().albums.map((item) => item.id), [album.id]);
+  assert.deepEqual((await call(app, bob.accessToken, 'GET', '/v1/backups')).json().albums, []);
   assert.equal((await call(app, bob.accessToken, 'GET', '/v1/partner/albums')).json().albums.length, 0);
-  const expectedSha256 = 'a'.repeat(64);
+  const bytes = Buffer.from('private backup bytes for a replacement phone');
+  const expectedSha256 = createHash('sha256').update(bytes).digest('hex');
   const metadata = {
     originalFileName: 'private.jpg',
     mimeType: 'image/jpeg',
-    fileSize: '4',
+    fileSize: String(bytes.length),
     width: 2,
     height: 2,
     clientAssetId: 'private-camera-1',
@@ -442,7 +483,17 @@ test('private backup and later sharing reuse one album and one asset without dup
   };
   const first = await call(app, alice.accessToken, 'POST', '/v1/albums/' + album.id + '/assets', metadata);
   assert.equal(first.statusCode, 201, first.body);
-  await client.asset.update({ where: { id: first.json().id }, data: { status: 'ready', sha256: expectedSha256 } });
+  const upload = await call(app, alice.accessToken, 'PUT', '/v1/assets/' + first.json().id + '/original',
+    bytes, { 'content-type': 'application/octet-stream', 'content-length': String(bytes.length) });
+  assert.equal(upload.statusCode, 200, upload.body);
+
+  const replacementPhone = await login('Alice', 'alice-test-password', 'Replacement phone');
+  const replacementBackups = await call(app, replacementPhone.accessToken, 'GET', '/v1/backups');
+  assert.deepEqual(replacementBackups.json().albums.map((item) => item.id), [album.id]);
+  const restoredOriginal = await call(app, replacementPhone.accessToken, 'GET',
+    '/v1/assets/' + first.json().id + '/original');
+  assert.equal(restoredOriginal.statusCode, 200, restoredOriginal.body);
+  assert.deepEqual(restoredOriginal.rawPayload, bytes);
   const shared = await call(app, alice.accessToken, 'PATCH', '/v1/albums/' + album.id, { shared: true });
   assert.equal(shared.statusCode, 200, shared.body);
   assert.equal(shared.json().id, album.id);

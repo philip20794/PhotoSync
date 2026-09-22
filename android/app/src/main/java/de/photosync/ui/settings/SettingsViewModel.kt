@@ -8,6 +8,7 @@ import de.photosync.data.SettingsRepository
 import de.photosync.data.local.AppDatabase
 import de.photosync.data.local.SecureCredentialStore
 import de.photosync.data.local.SyncSettingsEntity
+import de.photosync.data.remote.PartnerAlbumDto
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -20,6 +21,7 @@ data class SettingsUiState(
     val displayName: String = "",
     val deviceName: String = "",
     val partnerName: String? = null,
+    val backups: List<PartnerAlbumDto> = emptyList(),
     val offlineBytes: Long = 0,
     val cacheBytes: Long = 0,
     val cacheMaxBytes: Long = 0,
@@ -47,6 +49,7 @@ class SettingsViewModel(private val repository: SettingsRepository) : ViewModel(
             displayName = account.user.displayName,
             deviceName = account.device.name,
             partnerName = account.partner?.displayName,
+            backups = repository.backups(),
             cacheBytes = repository.cacheBytes(),
         )
     }
@@ -59,6 +62,11 @@ class SettingsViewModel(private val repository: SettingsRepository) : ViewModel(
             partnerName = account.partner?.displayName,
             message = "Kontodaten gespeichert.",
         )
+    }
+
+    fun restoreBackup(album: PartnerAlbumDto) = action {
+        repository.restoreBackup(album)
+        transient.value = transient.value.copy(message = "Backup-Download gestartet.")
     }
 
     fun setAutoBackup(value: Boolean) = action { repository.setAutoBackup(value) }

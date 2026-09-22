@@ -22,6 +22,7 @@ data class SharedAlbumEntity(
     val volumeName: String,
     val bucketId: String,
     val title: String,
+    val relativePath: String = "",
     val serverAlbumId: String? = null,
     val shareRequested: Boolean = true,
     val backupRequested: Boolean = false,
@@ -101,6 +102,11 @@ interface SyncDao {
 
     @Query("UPDATE shared_albums SET title = :title, shareRequested = 1, lastError = NULL WHERE localAlbumId = :localAlbumId")
     suspend fun enableExistingAlbum(localAlbumId: String, title: String)
+
+    @Transaction
+    suspend fun adoptRemoteAlbum(album: SharedAlbumEntity) {
+        if (getAlbum(album.localAlbumId) == null) insertAlbum(album)
+    }
 
     @Transaction
     suspend fun enableAlbum(album: SharedAlbumEntity) {

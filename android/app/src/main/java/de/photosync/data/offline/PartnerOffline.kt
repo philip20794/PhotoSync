@@ -158,6 +158,26 @@ class PartnerOfflineRepository(
         return if (file.path == root.path || file.path.startsWith(root.path + File.separator)) file else null
     }
 
+    suspend fun restoreOwnBackup(albumId: String, optimizedBytes: Long, originalBytes: Long) {
+        val now = System.currentTimeMillis()
+        database.withTransaction {
+            val generation = maxOf(now, (database.offlineDao().album(scope, albumId)?.updatedAt ?: 0) + 1)
+            database.offlineDao().saveAlbum(
+                OfflineAlbumEntity(
+                    scope = scope,
+                    albumId = albumId,
+                    desiredMode = OfflineMode.ORIGINAL,
+                    estimatedOptimizedBytes = optimizedBytes,
+                    estimatedOriginalBytes = originalBytes,
+                    status = OfflineStatus.PENDING,
+                    updatedAt = generation,
+                ),
+            )
+            database.offlineDao().setAlbumVariant(scope, albumId, OfflineMode.ORIGINAL, generation)
+        }
+        enqueue(albumId)
+    }
+
     suspend fun setAlbumMode(albumId: String, mode: String, optimizedBytes: Long, originalBytes: Long) {
         require(mode in setOf(OfflineMode.NONE, OfflineMode.OPTIMIZED, OfflineMode.ORIGINAL))
         val now = System.currentTimeMillis()
@@ -250,11 +270,13 @@ class PartnerOfflineWorker(context: Context, params: WorkerParameters) : Corouti
         val token = credentials.readAccessToken() ?: return Result.failure()
         val api = RetrofitFactory.create(server.baseUrl, fixedToken = token)
         return try {
-            if (api.partnerAlbums().albums.none { it.id == albumId }) {
+            val accessible = api.partnerAlbums().albums.any { it.id == albumId } ||
+                api.backups().albums.any { it.id == albumId }
+            if (!accessible) {
                 dao.requestRemoval(scope, albumId)
                 return Result.retry()
             }
-            setForeground(de.photosync.data.sync.TransferForeground.info(applicationContext, albumId.hashCode(), "Partneralbum wird offline gespeichert"))
+            setForeground(de.photosync.data.sync.TransferForeground.info(applicationContext, albumId.hashCode(), "Backup wird auf dieses Gerät heruntergeladen"))
             var cursor: String? = album.metadataCursor
             var complete = album.metadataComplete
             while (!complete) {

@@ -19,7 +19,7 @@ import retrofit2.http.Path
 data class HealthResponse(val status: String, val checks: Map<String, String>)
 
 @Serializable
-data class UserDto(val id: String, val displayName: String)
+data class UserDto(val id: String, val displayName: String, val username: String = "")
 
 @Serializable
 data class DeviceDto(val id: String, val name: String, val createdAt: String, val revokedAt: String? = null)
@@ -39,14 +39,13 @@ data class MeResponse(val user: UserDto, val device: DeviceDto, val partner: Use
 data class UpdateProfileRequest(val displayName: String, val deviceName: String)
 
 @Serializable
-data class SetupRequest(val displayName: String, val deviceName: String)
-
-@Serializable
-data class PairRequest(val code: String, val displayName: String? = null, val deviceName: String)
+data class LoginRequest(val username: String, val password: String, val deviceName: String)
 
 @Serializable
 data class CreateAlbumRequest(
     val clientAlbumId: String,
+    val sourceVolume: String,
+    val sourceRelativePath: String,
     val title: String,
     val shared: Boolean = true,
     val backedUp: Boolean = false,
@@ -65,6 +64,8 @@ data class AlbumDto(
     val backedUp: Boolean = false,
     val sourceDeviceId: String? = null,
     val clientAlbumId: String? = null,
+    val sourceVolume: String? = null,
+    val sourceRelativePath: String? = null,
     val createdAt: String,
     val updatedAt: String,
 )
@@ -89,6 +90,9 @@ data class PartnerAlbumDto(
 
 @Serializable
 data class PartnerAlbumsResponse(val albums: List<PartnerAlbumDto>)
+
+@Serializable
+data class AlbumsResponse(val albums: List<AlbumDto>)
 
 @Serializable
 data class CreateAssetRequest(
@@ -205,14 +209,8 @@ interface PhotoSyncApi {
     @GET("health")
     suspend fun health(): HealthResponse
 
-    @POST("v1/auth/setup")
-    suspend fun setup(
-        @Header("Authorization") setupAuthorization: String,
-        @Body request: SetupRequest,
-    ): AuthResponse
-
-    @POST("v1/auth/pair")
-    suspend fun pair(@Body request: PairRequest): AuthResponse
+    @POST("v1/auth/login")
+    suspend fun login(@Body request: LoginRequest): AuthResponse
 
     @GET("v1/me")
     suspend fun me(): MeResponse
@@ -265,6 +263,12 @@ interface PhotoSyncApi {
 
     @HTTP(method = "DELETE", path = "v1/trash", hasBody = true)
     suspend fun emptyTrash(@Body request: AssetIdsRequest = AssetIdsRequest(emptyList())): PurgeResponse
+
+    @GET("v1/albums")
+    suspend fun albums(): AlbumsResponse
+
+    @GET("v1/backups")
+    suspend fun backups(): PartnerAlbumsResponse
 
     @GET("v1/partner/albums")
     suspend fun partnerAlbums(): PartnerAlbumsResponse

@@ -19,6 +19,40 @@ import java.util.UUID
 class OfflineMigrationTest {
     private val context = ApplicationProvider.getApplicationContext<Context>()
 
+    @Test fun versionEightAlbumsGainStableRelativePathWithoutLosingState() {
+        val name = "album-source-migration-" + UUID.randomUUID()
+        val helper = FrameworkSQLiteOpenHelperFactory().create(
+            SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(name)
+                .callback(object : SupportSQLiteOpenHelper.Callback(8) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL("""CREATE TABLE shared_albums (
+                            localAlbumId TEXT NOT NULL PRIMARY KEY, mediaStoreAlbumId TEXT NOT NULL,
+                            sourceDeviceId TEXT NOT NULL, volumeName TEXT NOT NULL, bucketId TEXT NOT NULL,
+                            title TEXT NOT NULL, serverAlbumId TEXT, shareRequested INTEGER NOT NULL,
+                            backupRequested INTEGER NOT NULL, remoteShared INTEGER NOT NULL,
+                            remoteBackedUp INTEGER NOT NULL, lastScanAt INTEGER, lastError TEXT)""")
+                        db.execSQL("INSERT INTO shared_albums VALUES ('local', 'camera', 'device', 'external', 'camera', 'Camera', 'server', 1, 1, 1, 1, NULL, NULL)")
+                    }
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+                }).build(),
+        )
+        val db = helper.writableDatabase
+        try {
+            AppDatabase.MIGRATION_8_9.migrate(db)
+            db.query("SELECT relativePath, serverAlbumId, shareRequested, backupRequested FROM shared_albums").use {
+                assertEquals(true, it.moveToFirst())
+                assertEquals("", it.getString(0))
+                assertEquals("server", it.getString(1))
+                assertEquals(1, it.getInt(2))
+                assertEquals(1, it.getInt(3))
+            }
+        } finally {
+            helper.close()
+            context.deleteDatabase(name)
+        }
+    }
+
     @Test fun versionSixAlbumsGainPrivateBackupFlagsWithoutLosingSharingState() {
         val name = "settings-migration-" + UUID.randomUUID()
         val helper = FrameworkSQLiteOpenHelperFactory().create(

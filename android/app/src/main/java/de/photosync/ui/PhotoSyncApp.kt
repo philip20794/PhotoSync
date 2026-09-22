@@ -68,7 +68,12 @@ fun PhotoSyncApp(applicationContext: Context) {
 
     when (state.session) {
         SessionState.Loading -> LoadingScreen()
-        SessionState.NeedsServer -> navController.NavigateWhenReady(Route.SERVER) {
+        SessionState.NeedsServer -> if (BuildConfig.IS_PRODUCTION) {
+            androidx.compose.runtime.LaunchedEffect(Unit) {
+                viewModel.configureRelease(BuildConfig.DEFAULT_SERVER_URL)
+            }
+            LoadingScreen()
+        } else navController.NavigateWhenReady(Route.SERVER) {
             NavHost(navController, startDestination = Route.SERVER) {
                 composable(Route.SERVER) { ServerScreen(state, viewModel) }
                 composable(Route.AUTH) { AuthenticationScreen(state, viewModel) }
@@ -137,70 +142,28 @@ private fun ServerScreen(state: AppUiState, viewModel: AppViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AuthenticationScreen(state: AppUiState, viewModel: AppViewModel) {
-    var page by rememberSaveable { mutableStateOf("pair") }
-    Scaffold(topBar = { TopAppBar(title = { Text("Gerät anmelden") }) }) { padding ->
+    var username by rememberSaveable { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    Scaffold(topBar = { TopAppBar(title = { Text("Anmelden") }) }) { padding ->
         Screen(padding) {
             Text("Willkommen bei PhotoSync", style = MaterialTheme.typography.headlineMedium)
-            Text("Verbinde dieses Gerät mit deiner privaten Fotobibliothek.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = MaterialTheme.shapes.large) {
-                Row(Modifier.fillMaxWidth().padding(4.dp)) {
-                    Tab(selected = page == "pair", onClick = { page = "pair" }, modifier = Modifier.weight(1f), text = { Text("Pairing") })
-                    Tab(selected = page == "setup", onClick = { page = "setup" }, modifier = Modifier.weight(1f), text = { Text("Ersteinrichtung") })
-                }
-            }
-            if (page == "setup") SetupForm(state, viewModel) else PairForm(state, viewModel)
+            OutlinedTextField(
+                value = username, onValueChange = { username = it }, modifier = Modifier.fillMaxWidth(),
+                singleLine = true, label = { Text("Benutzername") },
+            )
+            OutlinedTextField(
+                value = password, onValueChange = { password = it }, modifier = Modifier.fillMaxWidth(),
+                singleLine = true, label = { Text("Passwort") },
+                visualTransformation = PasswordVisualTransformation(),
+            )
+            Button(
+                onClick = { viewModel.login(username, password) },
+                enabled = !state.isWorking && username.isNotBlank() && password.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Anmelden") }
             Feedback(state)
         }
     }
-}
-
-@Composable
-private fun SetupForm(state: AppUiState, viewModel: AppViewModel) {
-    var setupToken by remember { mutableStateOf("") }
-    var name by rememberSaveable { mutableStateOf("") }
-    var deviceName by rememberSaveable { mutableStateOf("") }
-    SetupFormContent(setupToken, name, deviceName, !state.isWorking, { setupToken = it }, { name = it }, { deviceName = it }) {
-        viewModel.setup(setupToken, name, deviceName)
-    }
-}
-
-@Composable
-private fun PairForm(state: AppUiState, viewModel: AppViewModel) {
-    var code by remember { mutableStateOf("") }
-    var name by rememberSaveable { mutableStateOf("") }
-    var deviceName by rememberSaveable { mutableStateOf("") }
-    PairingFormContent(code, name, deviceName, !state.isWorking, { code = it }, { name = it }, { deviceName = it }) {
-        viewModel.pair(code, name, deviceName)
-    }
-}
-
-/** Authentication form content, independent of server state for Android Studio previews. */
-@Composable
-internal fun SetupFormContent(
-    setupToken: String, name: String, deviceName: String, enabled: Boolean,
-    onTokenChange: (String) -> Unit = {}, onNameChange: (String) -> Unit = {}, onDeviceNameChange: (String) -> Unit = {}, onSubmit: () -> Unit = {},
-) {
-    Spacer(Modifier.height(8.dp))
-    Text("Neue Bibliothek einrichten", style = MaterialTheme.typography.headlineSmall)
-    Text("Lege dein erstes Profil und dieses Gerät an.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-    OutlinedTextField(setupToken, onTokenChange, Modifier.fillMaxWidth(), label = { Text("Setup-Token") }, visualTransformation = PasswordVisualTransformation())
-    OutlinedTextField(name, onNameChange, Modifier.fillMaxWidth(), label = { Text("Dein Name") })
-    OutlinedTextField(deviceName, onDeviceNameChange, Modifier.fillMaxWidth(), label = { Text("Gerätename") })
-    Button(onClick = onSubmit, enabled = enabled, modifier = Modifier.fillMaxWidth()) { Text("Erstes Gerät registrieren") }
-}
-
-@Composable
-internal fun PairingFormContent(
-    code: String, name: String, deviceName: String, enabled: Boolean,
-    onCodeChange: (String) -> Unit = {}, onNameChange: (String) -> Unit = {}, onDeviceNameChange: (String) -> Unit = {}, onSubmit: () -> Unit = {},
-) {
-    Spacer(Modifier.height(8.dp))
-    Text("Gerät verbinden", style = MaterialTheme.typography.headlineSmall)
-    Text("Gib den Pairing-Code ein, den du auf einem verbundenen Gerät erhalten hast.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-    OutlinedTextField(code, onCodeChange, Modifier.fillMaxWidth(), label = { Text("Pairing-Code") }, visualTransformation = PasswordVisualTransformation())
-    OutlinedTextField(name, onNameChange, Modifier.fillMaxWidth(), label = { Text("Dein Name (Partner)") })
-    OutlinedTextField(deviceName, onDeviceNameChange, Modifier.fillMaxWidth(), label = { Text("Gerätename") })
-    Button(onClick = onSubmit, enabled = enabled, modifier = Modifier.fillMaxWidth()) { Text("Gerät per Pairing verbinden") }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

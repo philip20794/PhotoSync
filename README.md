@@ -48,7 +48,7 @@ docker compose down
 
 ## Migrationen
 
-Die erste Migration legt `service_metadata` an, die zweite Accounts, Geräte und Pairing-Codes. Die dritte ergänzt Alben und Assets. Die vierte ergänzt widerrufbare Albumfreigaben sowie stabile Geräte-/Asset-IDs und erwartete SHA-256-Werte. Die fünfte ergänzt persistente Thumbnail-/Optimized-Jobs. Die sechste ergänzt erneuerbare Originalupload-Leases und setzt Schema-Version 6. Prisma verwaltet die Historie in `_prisma_migrations`. Originalbytes liegen außerhalb der Datenbank.
+Prisma verwaltet die vollständige Historie in _prisma_migrations. Schema 13 setzt die freigegebenen alten Anwendungsdaten bewusst zurück und führt Argon2id-Konten sowie die kontoweit stabile Albumquelle ein. Originalbytes liegen außerhalb der Datenbank.
 
 ```sh
 # Nach Schema-/Codeänderungen Images neu bauen:
@@ -87,21 +87,18 @@ docker run --rm \
   /quality-input/video1.mp4 /quality-input/video2.mp4
 ```
 
-## Ersten Nutzer und Partner verbinden
+## Accounts lokal verwalten
 
-Die Entwicklungsdatenbank wird nicht mit Demo-Accounts befüllt. Setup bleibt ohne Betreiberfreigabe deaktiviert.
+Accounts werden nicht als Demo-Daten angelegt und es gibt kein öffentliches Setup oder Pairing. Die lokale Operator-CLI verwaltet die zwei Konten:
 
-```sh
-docker compose exec -T server node dist/auth/setup-token.js
-```
+    docker compose exec server npm run --silent operator -- user list
+    docker compose exec server npm run --silent operator -- user create Philip
+    docker compose exec server npm run --silent operator -- user create Runa
+    docker compose exec server npm run --silent operator -- user set-password Philip
+    docker compose exec server npm run --silent operator -- device list Philip
+    docker compose exec server npm run --silent operator -- device revoke <device-uuid>
 
-Nur den ausgegebenen `SETUP_TOKEN_HASH` in `.env` übernehmen, das rohe `setupToken` einmal sicher an den ersten Nutzer übergeben. Danach `docker compose up -d --wait server` ausführen. `POST /v1/auth/setup` mit diesem Setup-Token richtet den ersten Account und dessen erstes Gerät ein. Mit dem erhaltenen Geräte-Token erstellt `POST /v1/auth/pairing-codes` einen Partnercode; `POST /v1/auth/pair` verbindet das Partnergerät. Für weitere eigene Geräte `purpose=device` verwenden.
-
-Private APIs benötigen `Authorization: Bearer <accessToken>`. Geräte-Tokens und Codes werden nur einmal ausgegeben; auf dem Server liegen ausschließlich Hashes. Nach dem Setup den Setup-Hash aus `.env` entfernen und den Server erneut starten. Genaue Bodies, Antworten, Widerruf und Recovery-Grenzen: [API-Dokumentation](docs/api.md).
-
-Neue Authentifizierungsvariablen: `SETUP_TOKEN_HASH` (leer = Setup deaktiviert), `PAIRING_CODE_TTL_SECONDS` (Standard 600), `AUTH_RATE_LIMIT_MAX` (Standard 10 je IP/Endpunkt/Minute). Die Tests prüfen auch paralleles Setup/Pairing, Ablauf, Einmalverwendung, Accountgrenze, private APIs und Gerätewiderruf.
-
-Album-, Asset-, Upload- und Variantenverträge stehen in der [API-Dokumentation](docs/api.md). Uploads verwenden zuerst JSON-Metadaten, danach eine persistente Sitzung und begrenzte Chunks mit exaktem `Upload-Offset`; die Volluploadroute bleibt kompatibel.
+set-password liest Passwort und Wiederholung verdeckt von einem interaktiven TTY. Die App meldet sich über POST /v1/auth/login an und erhält anschließend ein eigenes widerrufbares Gerätetoken. AUTH_RATE_LIMIT_MAX begrenzt Loginversuche je IP und Minute.
 
 ## Environment-Konfiguration
 

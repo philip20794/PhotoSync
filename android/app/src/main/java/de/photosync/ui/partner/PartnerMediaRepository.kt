@@ -46,8 +46,12 @@ class PartnerMediaRepository(
         SyncScheduler.runNow(context)
         emitAll(Pager(
             config = PagingConfig(pageSize = PAGE_SIZE, prefetchDistance = PREFETCH_DISTANCE, enablePlaceholders = false, maxSize = 240),
-            pagingSourceFactory = { database.remoteDao().assets(scope, albumId) },
-        ).flow.map { page -> page.map { json.decodeFromString<AssetDto>(it.json) } })
+            // Room is filled by the durable background reconciliation, but it must
+            // not be the gallery's paging boundary: a newly opened large album can
+            // contain only its first reconciled batch. The grid's append requests
+            // therefore follow the server cursor directly.
+            pagingSourceFactory = { PartnerAssetPagingSource(api, albumId) },
+        ).flow)
     }
 
     suspend fun thumbnail(asset: AssetDto): File = cache.imageFile(asset.partnerCacheKey(scope, PartnerVariant.THUMBNAIL)) {

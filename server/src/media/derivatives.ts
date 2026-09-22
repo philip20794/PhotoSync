@@ -120,16 +120,34 @@ async function probeVideo(path: string, timeoutMs: number) {
   });
 }
 
-async function createImageDerivative(sourcePath: string, temporaryPath: string, kind: DerivativeKind): Promise<Omit<OutputInfo, 'storagePath' | 'sha256' | 'fileSize'>> {
+async function createImageDerivative(sourcePath: string, temporaryPath: string, kind: DerivativeKind, applyOrientation = true): Promise<Omit<OutputInfo, 'storagePath' | 'sha256' | 'fileSize'>> {
   const thumbnail = kind === 'thumbnail';
   const limit = thumbnail ? DERIVATIVE_POLICY.thumbnail.maxPixels : DERIVATIVE_POLICY.optimizedImage.maxPixels;
   const quality = thumbnail ? DERIVATIVE_POLICY.thumbnail.imageQuality : DERIVATIVE_POLICY.optimizedImage.quality;
-  const info = await sharp(sourcePath, { failOn: 'error', limitInputPixels: 200_000_000 })
-    .autoOrient()
+  const pipeline = sharp(sourcePath, { failOn: 'error', limitInputPixels: 200_000_000 });
+  if (applyOrientation) pipeline.autoOrient();
+  const info = await pipeline
     .resize({ width: limit, height: limit, fit: 'inside', withoutEnlargement: true })
     .webp({ quality, effort: thumbnail ? 4 : 5, preset: 'photo', smartSubsample: true })
     .toFile(temporaryPath);
   return { mimeType: 'image/webp', width: info.width, height: info.height, durationMillis: null };
+}
+
+/**
+ * Sharp's bundled libheif lacks the HEVC decoder needed by iPhone HEIC files.
+ * Debian's heif-convert carries libheif with libde265, then Sharp performs the
+ * same orientation, resize and WebP encoding as for every other image.
+ */
+async function createHeifDerivative(sourcePath: string, temporaryPath: string, kind: DerivativeKind, timeoutMs: number): Promise<Omit<OutputInfo, 'storagePath' | 'sha256' | 'fileSize'>> {
+  const decodedPath = `${temporaryPath}.${randomUUID()}.jpg`;
+  try {
+    await runTool('heif-convert', [sourcePath, decodedPath], timeoutMs);
+    // heif-convert has already applied the source EXIF orientation to pixels;
+    // do not apply the retained Orientation tag a second time in Sharp.
+    return await createImageDerivative(decodedPath, temporaryPath, kind, false);
+  } finally {
+    await unlink(decodedPath).catch(() => undefined);
+  }
 }
 
 async function createVideoDerivative(sourcePath: string, temporaryPath: string, kind: DerivativeKind, asset: SourceAsset, timeoutMs: number): Promise<Omit<OutputInfo, 'storagePath' | 'sha256' | 'fileSize'>> {
@@ -172,8 +190,10 @@ export async function generateDerivative(config: Config, asset: SourceAsset, kin
     }
   }
   try {
-    const metadata = asset.mimeType.startsWith('image/')
-      ? await createImageDerivative(sourcePath, temporaryPath, kind)
+    const metadata = asset.mimeType === 'image/heic' || asset.mimeType === 'image/heif'
+      ? await createHeifDerivative(sourcePath, temporaryPath, kind, config.derivativeToolTimeoutMs)
+      : asset.mimeType.startsWith('image/')
+        ? await createImageDerivative(sourcePath, temporaryPath, kind)
       : await createVideoDerivative(sourcePath, temporaryPath, kind, asset, config.derivativeToolTimeoutMs);
     const file = await stat(temporaryPath);
     if (!file.isFile() || file.size <= 0) throw new Error('Derivative output is empty');

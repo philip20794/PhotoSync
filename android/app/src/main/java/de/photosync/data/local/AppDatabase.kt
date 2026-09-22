@@ -21,6 +21,8 @@ import de.photosync.data.sync.RemoteCheckpoint
 import de.photosync.data.sync.RemoteMetadata
 import de.photosync.data.sync.RemoteWork
 import de.photosync.data.sync.RemoteDao
+import de.photosync.ui.partner.PartnerDisplayDao
+import de.photosync.ui.partner.PartnerDisplayEntity
 
 @Entity(tableName = "server_config")
 data class ServerConfigEntity(
@@ -68,8 +70,8 @@ interface AppStateDao {
 }
 
 @Database(
-    entities = [ServerConfigEntity::class, DeviceSessionEntity::class, SharedAlbumEntity::class, UploadQueueEntity::class, SyncSettingsEntity::class, OfflineAlbumEntity::class, OfflineAssetEntity::class, OfflineCleanupEntity::class, RemoteCheckpoint::class, RemoteMetadata::class, RemoteWork::class],
-    version = 8,
+    entities = [ServerConfigEntity::class, DeviceSessionEntity::class, SharedAlbumEntity::class, UploadQueueEntity::class, SyncSettingsEntity::class, OfflineAlbumEntity::class, OfflineAssetEntity::class, OfflineCleanupEntity::class, RemoteCheckpoint::class, RemoteMetadata::class, RemoteWork::class, PartnerDisplayEntity::class],
+    version = 10,
     exportSchema = true,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -78,6 +80,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun settingsDao(): SettingsDao
     abstract fun offlineDao(): OfflineDao
     abstract fun remoteDao(): RemoteDao
+    abstract fun partnerDisplayDao(): PartnerDisplayDao
 
     companion object {
         private const val DATABASE_NAME = "photosync.db"
@@ -226,6 +229,18 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE shared_albums ADD COLUMN relativePath TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE TABLE IF NOT EXISTS partner_display_overrides (scope TEXT NOT NULL, assetId TEXT NOT NULL, rotationDegrees INTEGER NOT NULL, PRIMARY KEY(scope, assetId))")
+            }
+        }
+
         @Volatile private var instance: AppDatabase? = null
 
         fun get(context: Context): AppDatabase = instance ?: synchronized(this) {
@@ -238,7 +253,7 @@ abstract class AppDatabase : RoomDatabase() {
             name,
         ).addMigrations(
             MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
-            MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8,
+            MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10,
         ).build()
     }
 }

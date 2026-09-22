@@ -49,6 +49,7 @@ internal class SyncEngine(
 
     suspend fun run(allowMediaTransfers: Boolean = true): SyncRunResult {
         dao.recoverInterruptedUploads(System.currentTimeMillis())
+        if (!reconcileRemoteAlbums()) return SyncRunResult(retry = true, moreWork = true)
         if (!inventorySharedAlbums()) return SyncRunResult(retry = true, moreWork = true)
         if (!syncAlbumSharing()) return SyncRunResult(retry = true, moreWork = true)
         for (item in dao.nextCancellations(session.deviceId, maxUploads)) {
@@ -144,17 +145,60 @@ internal class SyncEngine(
         dao.hasRemainingUploads(session.deviceId) || dao.hasRemainingDeletes(session.deviceId) ||
             dao.hasRemainingReconciliation(session.deviceId)
 
+    private suspend fun reconcileRemoteAlbums(): Boolean {
+        if (mediaAccess() == MediaAccess.NONE) return true
+        return try {
+            val localBySource = mediaStore.loadAlbums().associateBy {
+                de.photosync.domain.model.albumSourceKey(it.volumeName, it.relativePath)
+            }
+            for (remote in api.albums().albums.filter { it.ownedByMe }) {
+                val volume = remote.sourceVolume ?: continue
+                val path = remote.sourceRelativePath ?: continue
+                val local = localBySource[
+                    de.photosync.domain.model.albumSourceKey(volume, path)
+                ] ?: continue
+                dao.adoptRemoteAlbum(
+                    SharedAlbumEntity(
+                        localAlbumId = session.deviceId + "|" + local.id,
+                        mediaStoreAlbumId = local.id,
+                        sourceDeviceId = session.deviceId,
+                        volumeName = local.volumeName,
+                        relativePath = local.relativePath,
+                        bucketId = local.bucketId,
+                        title = local.name,
+                        serverAlbumId = remote.id,
+                        shareRequested = remote.shared,
+                        backupRequested = remote.backedUp,
+                        remoteShared = remote.shared,
+                        remoteBackedUp = remote.backedUp,
+                    ),
+                )
+            }
+            true
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            if (error.isAuthenticationFailure()) throw error
+            !error.isRetryable()
+        }
+    }
+
     private suspend fun syncAlbumSharing(): Boolean {
         for (album in dao.getAlbumsNeedingRemoteUpdate(session.deviceId)) {
             try {
                 if (album.shareRequested || album.backupRequested) {
                     val remote = api.createAlbum(CreateAlbumRequest(
                         album.mediaStoreAlbumId,
+                        de.photosync.domain.model.normalizeAlbumVolume(album.volumeName),
+                        album.relativePath.ifBlank { album.title },
                         album.title,
                         shared = album.shareRequested,
                         backedUp = album.backupRequested,
                     ))
                     dao.markRemoteAlbum(album.localAlbumId, remote.id, remote.shared, remote.backedUp)
+                    if (remote.shared != album.shareRequested) {
+                        val updated = api.setAlbumSharing(remote.id, SetAlbumSharingRequest(album.shareRequested))
+                        dao.markRemoteSharing(album.localAlbumId, updated.shared)
+                    }
                 } else {
                     val serverId = album.serverAlbumId ?: continue
                     api.setAlbumSharing(serverId, SetAlbumSharingRequest(false))
@@ -184,6 +228,7 @@ internal class SyncEngine(
                             mediaStoreAlbumId = local.id,
                             sourceDeviceId = session.deviceId,
                             volumeName = local.volumeName,
+                            relativePath = local.relativePath,
                             bucketId = local.bucketId,
                             title = local.name,
                             shareRequested = false,

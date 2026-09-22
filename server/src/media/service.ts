@@ -42,8 +42,26 @@ type TrashAssetInput = AssetViewInput & {
 const notFound = () => new ApiError(404, 'NOT_FOUND', 'Resource not found');
 const conflict = (message: string) => new ApiError(409, 'CONFLICT', message);
 
+function normalizeSourceVolume(value: string): string {
+  const normalized = value.normalize('NFKC').trim().toLowerCase();
+  return normalized === 'external' ? 'external_primary' : normalized;
+}
+
+function normalizeSourceRelativePath(value: string): string {
+  let parts = value.normalize('NFKC').replaceAll('\\', '/').split('/')
+    .map((part) => part.trim()).filter(Boolean);
+  const lower = parts.map((part) => part.toLowerCase());
+  const prefix = lower.slice(0, 3).join('/');
+  if (prefix === 'storage/emulated/0' || prefix === 'storage/self/primary') parts = parts.slice(3);
+  else if (lower[0] === 'sdcard') parts = parts.slice(1);
+  if (parts.length === 0 || parts.some((part) => part === '.' || part === '..')) {
+    throw new ApiError(400, 'INVALID_REQUEST', 'Invalid album source path');
+  }
+  return parts.join('/').toLowerCase();
+}
+
 function albumView(album: {
-  id: string; ownerId: string; sourceDeviceId: string; clientAlbumId: string; title: string;
+  id: string; ownerId: string; sourceDeviceId: string; clientAlbumId: string; sourceVolume: string; sourceRelativePath: string; title: string;
   sharedAt: Date | null; backedUpAt: Date | null; createdAt: Date; updatedAt: Date;
   owner: { id: string; displayName: string };
 }, principal: Principal) {
@@ -57,6 +75,8 @@ function albumView(album: {
       ? {
           sourceDeviceId: album.sourceDeviceId,
           clientAlbumId: album.clientAlbumId,
+          sourceVolume: album.sourceVolume,
+          sourceRelativePath: album.sourceRelativePath,
           backedUp: album.backedUpAt !== null,
         }
       : {}),
@@ -801,33 +821,34 @@ export function createMediaService(client: PrismaClient, config: Config, hooks: 
   }
 
   return {
-    async createAlbum(principal: Principal, input: { clientAlbumId: string; title: string; shared: boolean; backedUp: boolean }) {
-      const duplicate = await client.album.findUnique({
-        where: { sourceDeviceId_clientAlbumId: {
-          sourceDeviceId: principal.deviceId, clientAlbumId: input.clientAlbumId,
+    async createAlbum(principal: Principal, input: {
+      clientAlbumId: string; sourceVolume: string; sourceRelativePath: string;
+      title: string; shared: boolean; backedUp: boolean;
+    }) {
+      const sourceVolume = normalizeSourceVolume(input.sourceVolume);
+      const sourceRelativePath = normalizeSourceRelativePath(input.sourceRelativePath);
+      const album = await client.album.upsert({
+        where: { ownerId_sourceVolume_sourceRelativePath: {
+          ownerId: principal.userId, sourceVolume, sourceRelativePath,
         } },
+        update: {
+          sourceDeviceId: principal.deviceId,
+          clientAlbumId: input.clientAlbumId,
+          title: input.title,
+          ...(input.backedUp ? { backedUpAt: new Date() } : {}),
+        },
+        create: {
+          ownerId: principal.userId,
+          sourceDeviceId: principal.deviceId,
+          clientAlbumId: input.clientAlbumId,
+          sourceVolume,
+          sourceRelativePath,
+          title: input.title,
+          sharedAt: input.shared ? new Date() : null,
+          backedUpAt: input.backedUp ? new Date() : null,
+        },
+        include: { owner: { select: ownerSelection } },
       });
-      const album = duplicate
-        ? await client.album.update({
-          where: { id: duplicate.id },
-          data: {
-            title: input.title,
-            sharedAt: input.shared ? new Date() : null,
-            backedUpAt: input.backedUp ? (duplicate.backedUpAt ?? new Date()) : duplicate.backedUpAt,
-          },
-          include: { owner: { select: ownerSelection } },
-        })
-        : await client.album.create({
-          data: {
-            ownerId: principal.userId,
-            sourceDeviceId: principal.deviceId,
-            clientAlbumId: input.clientAlbumId,
-            title: input.title,
-            sharedAt: input.shared ? new Date() : null,
-            backedUpAt: input.backedUp ? new Date() : null,
-          },
-          include: { owner: { select: ownerSelection } },
-        });
       return albumView(album, principal);
     },
 
@@ -851,6 +872,41 @@ export function createMediaService(client: PrismaClient, config: Config, hooks: 
         orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       });
       return { albums: albums.map((album) => albumView(album, principal)) };
+    },
+
+    async listBackups(principal: Principal) {
+      const albums = await client.album.findMany({
+        where: { ownerId: principal.userId, backedUpAt: { not: null } },
+        include: {
+          owner: { select: ownerSelection },
+          _count: { select: { assets: { where: { status: 'ready', integrityStatus: 'healthy' } } } },
+          assets: {
+            where: { status: 'ready', integrityStatus: 'healthy', derivatives: { some: { kind: 'thumbnail', status: 'ready' } } },
+            orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], take: 1,
+            select: {
+              id: true, updatedAt: true,
+              derivatives: {
+                where: { kind: 'thumbnail', status: 'ready' },
+                orderBy: { updatedAt: 'desc' }, take: 1,
+                select: { updatedAt: true, sha256: true },
+              },
+            },
+          },
+        },
+        orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+      });
+      return { albums: await Promise.all(albums.map(async (album) => {
+        const [original, optimized] = await Promise.all([
+          client.asset.aggregate({ where: { albumId: album.id, status: 'ready', integrityStatus: 'healthy' }, _sum: { fileSize: true } }),
+          client.assetDerivative.aggregate({
+            where: { kind: 'optimized', status: 'ready', asset: { albumId: album.id, status: 'ready', integrityStatus: 'healthy' } },
+            _sum: { fileSize: true },
+          }),
+        ]);
+        return albumSummaryView(album, principal, {
+          original: original._sum.fileSize ?? 0n, optimized: optimized._sum.fileSize ?? 0n,
+        });
+      })) };
     },
 
     async listPartnerAlbums(principal: Principal) {
