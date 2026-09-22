@@ -10,10 +10,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -27,6 +29,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -151,22 +154,58 @@ private fun TrashAssetDto.asAsset() = AssetDto(
 fun TrashScreen(applicationContext: Context, baseUrl: String, userId: String) {
     val viewModel: TrashViewModel = viewModel(factory = TrashViewModel.factory(applicationContext, baseUrl, userId))
     val state by viewModel.state.collectAsStateWithLifecycle()
+    TrashContent(
+        state = state,
+        onRefresh = viewModel::refresh,
+        onRestore = viewModel::restoreSelected,
+        onPurge = viewModel::purgeSelected,
+        onEmpty = viewModel::empty,
+        onToggle = viewModel::toggle,
+        thumbnail = viewModel::thumbnail,
+    )
+}
+
+/** The app's trash layout, with side effects supplied by the ViewModel container. */
+@Composable
+internal fun TrashContent(
+    state: TrashState,
+    onRefresh: () -> Unit = {}, onRestore: () -> Unit = {}, onPurge: () -> Unit = {}, onEmpty: () -> Unit = {},
+    onToggle: (String) -> Unit = {},
+    thumbnail: suspend (TrashAssetDto) -> File? = { null },
+) {
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Papierkorb", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            TextButton(onClick = viewModel::refresh, enabled = !state.loading && !state.working) { Text("Aktualisieren") }
+        Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 12.dp, top = 20.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Papierkorb", style = MaterialTheme.typography.headlineMedium)
+                Text("Gelöschte Fotos bleiben 90 Tage erhalten", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            TextButton(onClick = onRefresh, enabled = !state.loading && !state.working) { Text("Aktualisieren") }
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = viewModel::restoreSelected, enabled = state.selected.isNotEmpty() && !state.working) { Text("Wiederherstellen") }
-            Button(onClick = viewModel::purgeSelected, enabled = state.selected.isNotEmpty() && !state.working) { Text("Endgültig löschen") }
-            TextButton(onClick = viewModel::empty, enabled = state.assets.isNotEmpty() && !state.working) { Text("Papierkorb leeren") }
+        if (state.selected.isNotEmpty()) {
+            Card(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+            ) {
+                Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("${state.selected.size} ausgewählt", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                    Button(onClick = onRestore, enabled = !state.working) { Text("Wiederherstellen") }
+                    TextButton(onClick = onPurge, enabled = !state.working) { Text("Löschen") }
+                }
+            }
+        } else if (state.assets.isNotEmpty()) {
+            TextButton(onClick = onEmpty, enabled = !state.working, modifier = Modifier.padding(horizontal = 12.dp)) { Text("Papierkorb leeren") }
         }
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(12.dp)) }
         when {
             state.loading && state.assets.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
-            state.assets.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { Text("Der Papierkorb ist leer.") }
-            else -> LazyColumn(Modifier.fillMaxSize()) {
-                items(state.assets, key = TrashAssetDto::id) { asset -> TrashRow(asset, asset.id in state.selected, !state.working, viewModel::toggle, viewModel::thumbnail) }
+            state.assets.isEmpty() -> Box(Modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Alles aufgeräumt", style = MaterialTheme.typography.headlineSmall)
+                    Text("Der Papierkorb ist leer.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                items(state.assets, key = TrashAssetDto::id) { asset -> TrashRow(asset, asset.id in state.selected, !state.working, onToggle, thumbnail) }
             }
         }
     }
@@ -182,16 +221,19 @@ private fun TrashRow(
 ) {
     var file by remember(asset.id, asset.updatedAt) { mutableStateOf<File?>(null) }
     LaunchedEffect(asset.id, asset.updatedAt) { file = runCatching { thumbnail(asset) }.getOrNull() }
-    Card(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp).clickable(enabled = enabled) { toggle(asset.id) }) {
-        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+    Card(
+        Modifier.fillMaxWidth().clickable(enabled = enabled) { toggle(asset.id) },
+        shape = MaterialTheme.shapes.large,
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp),
+    ) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = selected, onCheckedChange = { toggle(asset.id) }, enabled = enabled)
-            if (file != null) AsyncImage(file, asset.originalFileName, Modifier.size(64.dp), contentScale = ContentScale.Crop)
-            else Box(Modifier.size(64.dp), contentAlignment = Alignment.Center) { Text("-") }
-            Column(Modifier.padding(start = 10.dp)) {
-                Text(asset.originalFileName, maxLines = 1)
-                Text(asset.originalAlbum.title, style = MaterialTheme.typography.bodySmall)
-                Text("Gelöscht: ${asset.deletedAt}", style = MaterialTheme.typography.bodySmall)
-                Text("Noch ${((asset.remainingRetentionSeconds + 86_399) / 86_400).coerceAtLeast(0)} Tage", style = MaterialTheme.typography.bodySmall)
+            if (file != null) AsyncImage(file, asset.originalFileName, Modifier.size(72.dp).clip(MaterialTheme.shapes.medium), contentScale = ContentScale.Crop)
+            else Box(Modifier.size(72.dp).clip(MaterialTheme.shapes.medium), contentAlignment = Alignment.Center) { Text("Foto", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            Column(Modifier.padding(start = 14.dp).weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(asset.originalFileName, maxLines = 1, style = MaterialTheme.typography.titleMedium)
+                Text(asset.originalAlbum.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Noch ${((asset.remainingRetentionSeconds + 86_399) / 86_400).coerceAtLeast(0)} Tage verfügbar", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
             }
         }
     }

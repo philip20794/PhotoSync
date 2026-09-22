@@ -3,20 +3,20 @@ package de.photosync.ui.settings
 import android.Manifest
 import android.content.Context
 import android.os.Build
-import android.text.format.Formatter
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -59,49 +59,72 @@ fun SettingsScreen(context: Context, baseUrl: String, userId: String) {
             initialized = true
         }
     }
-    val preferences = state.preferences
-    Column(
-        Modifier.padding(20.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("Konto", style = MaterialTheme.typography.titleLarge)
-        OutlinedTextField(displayName, { displayName = it }, Modifier.fillMaxWidth(), label = { Text("Anzeigename") })
-        OutlinedTextField(deviceName, { deviceName = it }, Modifier.fillMaxWidth(), label = { Text("Gerätename") })
-        Text(if (state.partnerName == null) "Partner: noch nicht verbunden" else "Partner: ${state.partnerName}")
-        Button(
-            onClick = { model.saveProfile(displayName, deviceName) },
-            enabled = !state.working && displayName.isNotBlank() && deviceName.isNotBlank(),
-        ) { Text("Namen speichern") }
-
-        Section("Synchronisation")
-        SettingSwitch(
-            "Medien nur über WLAN synchronisieren",
-            preferences?.wifiOnly == true,
-            state.working,
-            model::setWifiOnly,
-        )
-        SettingSwitch("Auto-Backup", preferences?.autoBackupEnabled == true, state.working, model::setAutoBackup)
-        Text(
-            "Auto-Backup sichert neue private Originale. Ausschalten stoppt nur neue private Sicherungen; vorhandene Backups bleiben erhalten.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-
-        Section("Speicher")
-        Text("Cache: ${Formatter.formatFileSize(context, state.cacheBytes)}")
-        Text("Offline-Dateien: ${Formatter.formatFileSize(context, state.offlineBytes)}")
-        CacheLimit(state.cacheMaxBytes, state.working, model::setCacheMax)
-        OutlinedButton(onClick = model::clearCache, enabled = !state.working) { Text("Cache leeren") }
-        Text("Offline-Dateien und eigene Originalmedien werden dabei nicht gelöscht.", style = MaterialTheme.typography.bodySmall)
-
-        Section("Status")
-        Text("Letzter erfolgreicher Sync: ${formatTime(preferences?.lastSuccessfulSyncAt)}")
-        Text("Server: ${when (preferences?.serverReachable) { true -> "erreichbar"; false -> "nicht erreichbar"; null -> "noch nicht geprüft" }}")
-        Text("Auto-Backup: ${if (preferences?.autoBackupEnabled == true) "aktiv" else "aus"}")
-
-        Section("Benachrichtigungen")
-        SettingSwitch("Bei Sync-Fehlern benachrichtigen", preferences?.notifySyncErrors != false, state.working) { enabled ->
+    SettingsContent(
+        state = state,
+        displayName = displayName,
+        deviceName = deviceName,
+        onDisplayNameChange = { displayName = it }, onDeviceNameChange = { deviceName = it },
+        onSave = { model.saveProfile(displayName, deviceName) }, onWifiOnly = model::setWifiOnly,
+        onAutoBackup = model::setAutoBackup, onClearCache = model::clearCache,
+        onNotifyErrors = { enabled ->
             if (enabled && Build.VERSION.SDK_INT >= 33) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             else model.setNotifyErrors(enabled)
+        },
+    )
+}
+
+/** Stateful actions are supplied by the container so this exact settings UI is previewable. */
+@Composable
+internal fun SettingsContent(
+    state: SettingsUiState,
+    displayName: String,
+    deviceName: String,
+    onDisplayNameChange: (String) -> Unit = {}, onDeviceNameChange: (String) -> Unit = {}, onSave: () -> Unit = {},
+    onWifiOnly: (Boolean) -> Unit = {}, onAutoBackup: (Boolean) -> Unit = {},
+    onClearCache: () -> Unit = {}, onNotifyErrors: (Boolean) -> Unit = {},
+) {
+    val preferences = state.preferences
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 20.dp, vertical = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(18.dp),
+    ) {
+        Text("Passe PhotoSync an deinen Alltag an.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        SettingsCard("Profil") {
+            OutlinedTextField(displayName, onDisplayNameChange, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Dein Name") })
+            OutlinedTextField(deviceName, onDeviceNameChange, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Dieses Gerät") })
+            Text(
+                state.partnerName?.let { "Verbunden mit $it" } ?: "Noch kein Partner verbunden",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = onSave,
+                enabled = !state.working && displayName.isNotBlank() && deviceName.isNotBlank(),
+            ) { Text("Änderungen speichern") }
+        }
+
+        SettingsCard("Synchronisierung") {
+            SettingSwitch("Nur über WLAN", "Schont dein mobiles Datenvolumen", preferences?.wifiOnly == true, state.working, onWifiOnly)
+            SettingSwitch("Automatisch sichern", "Neue Fotos privat auf deinem Server sichern", preferences?.autoBackupEnabled == true, state.working, onAutoBackup)
+        }
+
+        SettingsCard("Benachrichtigungen") {
+            SettingSwitch("Bei Problemen informieren", "Meldet sich nur, wenn deine Aufmerksamkeit nötig ist", preferences?.notifySyncErrors != false, state.working, onNotifyErrors)
+        }
+
+        SettingsCard("Speicher") {
+            Text("Temporäre Dateien können jederzeit sicher entfernt werden. Offline gespeicherte Alben bleiben erhalten.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            OutlinedButton(onClick = onClearCache, enabled = !state.working) { Text("Temporäre Dateien leeren") }
+        }
+
+        SettingsCard("Verbindung") {
+            Text(
+                when (preferences?.serverReachable) { true -> "PhotoSync ist verbunden"; false -> "PhotoSync ist gerade offline"; null -> "Verbindung wird geprüft" },
+                style = MaterialTheme.typography.titleMedium,
+                color = if (preferences?.serverReachable == false) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+            )
+            Text("Zuletzt synchronisiert: ${formatTime(preferences?.lastSuccessfulSyncAt)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         state.message?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
         state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
@@ -111,40 +134,29 @@ fun SettingsScreen(context: Context, baseUrl: String, userId: String) {
 }
 
 @Composable
-private fun Section(title: String) {
-    Spacer(Modifier.height(8.dp))
-    Text(title, style = MaterialTheme.typography.titleLarge)
+private fun SettingsCard(title: String, content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit) {
+    Card(
+        Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)),
+    ) {
+        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text(title, style = MaterialTheme.typography.titleLarge)
+            content()
+        }
+    }
 }
 
 @Composable
-private fun SettingSwitch(label: String, checked: Boolean, working: Boolean, onChange: (Boolean) -> Unit) {
+private fun SettingSwitch(label: String, supporting: String, checked: Boolean, working: Boolean, onChange: (Boolean) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, Modifier.weight(1f))
+        Column(Modifier.weight(1f).padding(end = 12.dp)) {
+            Text(label, style = MaterialTheme.typography.titleMedium)
+            Text(supporting, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Switch(checked = checked, onCheckedChange = onChange, enabled = !working)
     }
 }
-
-@Composable
-private fun CacheLimit(current: Long, working: Boolean, onSelect: (Long) -> Unit) {
-    val values = listOf(500L, 1024L, 2048L, 5120L, 10240L).map { it * 1024L * 1024L }
-    var expanded by remember { mutableStateOf(false) }
-    Column {
-        OutlinedButton(onClick = { expanded = true }, enabled = !working) {
-            Text("Cache-Maximum: ${if (current > 0) formatLimit(current) else "…"}")
-        }
-        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-            values.forEach { bytes ->
-                DropdownMenuItem(
-                    text = { Text(formatLimit(bytes)) },
-                    onClick = { expanded = false; onSelect(bytes) },
-                )
-            }
-        }
-    }
-}
-
-private fun formatLimit(bytes: Long): String =
-    if (bytes >= 1024L * 1024L * 1024L) "${bytes / (1024L * 1024L * 1024L)} GB" else "${bytes / (1024L * 1024L)} MB"
 
 private fun formatTime(value: Long?): String =
     value?.let { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(it)) } ?: "noch nie"
